@@ -238,7 +238,10 @@ impl State {
             join_session_id: String::new(),
         };
 
-        (state, Task::none())
+        // Auto-connect to the configured signal server on launch (a wallet
+        // should reach its network immediately; the server is set via
+        // MPC_SIGNAL_SERVER / MPC_ROOM). The user can still reconnect from the UI.
+        (state, Task::done(Message::ConnectWebsocket))
     }
 
     fn theme(&self) -> Theme {
