@@ -170,7 +170,13 @@ impl CoreAdapter {
             let dkg_done =
                 matches!(model.wallet_state.dkg_round, tui_node::elm::message::DKGRound::Complete);
             let active = model.wallet_state.dkg_in_progress && !dkg_done;
-            let (round, progress) = dkg_round_progress(&model.wallet_state.dkg_round);
+            // Zero the bar when idle (otherwise the Initialization=10% mapping
+            // leaves a stub bar showing under "DKG idle").
+            let (round, progress) = if active {
+                dkg_round_progress(&model.wallet_state.dkg_round)
+            } else {
+                (0, 0.0)
+            };
             tokio::spawn(async move {
                 cb.update_wallets(wallets).await;
                 cb.update_connection_status(connected, false).await;
