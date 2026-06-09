@@ -71,7 +71,7 @@
               if pkgs.stdenv.isDarwin then "${pkgs.libiconv}/lib" else "";
             nativeBuildInputs = commonBuildInputs ++ platformBuildInputs;
             shellHook = ''
-              echo "🖥️  Starlab Desktop dev shell (Iced + frost-mpc engine)"
+              echo "🖥️  Starlab Desktop dev shell (Iced + starlab-mpc engine)"
               echo "  cargo run    - launch the desktop wallet"
             '';
           };

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
-use tui_node::core::{
+use starlab_client::core::{
     dkg_manager::DkgManager,
     offline_manager::OfflineManager,
     session_manager::SessionManager,
@@ -10,9 +10,9 @@ use tui_node::core::{
     wallet_manager::WalletManager,
     CoreState, UICallback, WalletInfo,
 };
-use tui_node::elm::headless::{spawn_ed25519, spawn_secp256k1};
-use tui_node::elm::model::{WalletConfig, WalletMode};
-use tui_node::elm::{Message, Model};
+use starlab_client::elm::headless::{spawn_ed25519, spawn_secp256k1};
+use starlab_client::elm::model::{WalletConfig, WalletMode};
+use starlab_client::elm::{Message, Model};
 
 use crate::ui_callback::{NativeUICallback, UiEvent};
 
@@ -44,8 +44,8 @@ pub struct CoreAdapter {
 
 /// Map the current FROST DKG phase to a (round, 0.0..=1.0 progress) pair for
 /// the progress bar. Mirrors the percentages the engine logs at each transition.
-fn dkg_round_progress(round: &tui_node::elm::message::DKGRound) -> (u8, f32) {
-    use tui_node::elm::message::DKGRound::*;
+fn dkg_round_progress(round: &starlab_client::elm::message::DKGRound) -> (u8, f32) {
+    use starlab_client::elm::message::DKGRound::*;
     match round {
         Initialization => (0, 0.10),
         WaitingForParticipants => (0, 0.20),
@@ -79,7 +79,7 @@ fn rich_wallets(model: &Model) -> Vec<crate::ui_callback::WalletView> {
         if let Ok(gk) = hex::decode(&m.group_public_key) {
             for (label, chain) in chains {
                 if let Ok(addr) =
-                    tui_node::blockchain_config::generate_address_for_chain(&gk, &m.curve_type, chain)
+                    starlab_client::blockchain_config::generate_address_for_chain(&gk, &m.curve_type, chain)
                 {
                     view.chains.push((label.to_string(), addr));
                 }
@@ -107,7 +107,7 @@ fn model_wallets(model: &Model) -> Vec<WalletInfo> {
                 hex::decode(&m.group_public_key)
                     .ok()
                     .and_then(|b| {
-                        tui_node::blockchain_config::generate_address_for_chain(
+                        starlab_client::blockchain_config::generate_address_for_chain(
                             &b, &m.curve_type, chain,
                         )
                         .ok()
@@ -154,7 +154,7 @@ impl CoreAdapter {
         // pushes are spawned since on_sync itself is synchronous. Curve-agnostic
         // (operates on Model), so it's shared by both spawn fns below.
         let cb_for_sync = ui_callback.clone();
-        let on_sync = move |model: &Model, _msg: Option<&tui_node::elm::Message>| {
+        let on_sync = move |model: &Model, _msg: Option<&starlab_client::elm::Message>| {
             let cb = cb_for_sync.clone();
             let wallets = model_wallets(model);
             // Multi-chain wallet list straight down the channel (not a trait method).
@@ -168,7 +168,7 @@ impl CoreAdapter {
             // engine hasn't flipped `dkg_in_progress` back to false on this
             // finalize path (otherwise the bar sticks at 100% "in progress").
             let dkg_done =
-                matches!(model.wallet_state.dkg_round, tui_node::elm::message::DKGRound::Complete);
+                matches!(model.wallet_state.dkg_round, starlab_client::elm::message::DKGRound::Complete);
             let active = model.wallet_state.dkg_in_progress && !dkg_done;
             // Zero the bar when idle (otherwise the Initialization=10% mapping
             // leaves a stub bar showing under "DKG idle").
@@ -194,7 +194,7 @@ impl CoreAdapter {
         // Unified mode = one ceremony → both curves (ETH+BTC + SOL+Sui in one
         // wallet). Flip the model into unified mode like the CLI's `--curve unified`.
         if curve == "unified" {
-            let _ = runner_tx.send(tui_node::elm::message::Message::SetUnifiedMode { unified: true });
+            let _ = runner_tx.send(starlab_client::elm::message::Message::SetUnifiedMode { unified: true });
         }
 
         Self {

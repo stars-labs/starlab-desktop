@@ -16,7 +16,7 @@
 
 use async_trait::async_trait;
 use tokio::sync::mpsc::UnboundedSender;
-use tui_node::core::{
+use starlab_client::core::{
     ConnectionInfo, OperationMode, ParticipantInfo, SDCardOperation, SessionInfo, SigningRequest,
     SigningState, UICallback, WalletInfo,
 };
