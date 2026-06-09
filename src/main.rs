@@ -3,7 +3,7 @@
 //! Ported from Slint to Iced (MIT-licensed) so the GUI stack is
 //! compatible with a proprietary product. The app follows Iced's Elm
 //! architecture, which maps cleanly onto the existing
-//! `tui_node::core::*Manager` backend:
+//! `starlab_client::core::*Manager` backend:
 //!
 //! * the old Slint global `AppState` becomes the [`State`] model,
 //! * Slint `callback`s become [`Message`] variants handled in
@@ -26,7 +26,7 @@ use iced::widget::{
 use iced::{Color, Element, Length, Subscription, Task, Theme};
 
 use core_adapter::CoreAdapter;
-use tui_node::core::{ConnectionInfo, SessionInfo, SessionStatus, SigningState};
+use starlab_client::core::{ConnectionInfo, SessionInfo, SessionStatus, SigningState};
 use ui_callback::UiEvent;
 
 // ---------------------------------------------------------------------------
@@ -409,9 +409,9 @@ impl State {
             UiEvent::MeshConnections(conns) => self.mesh_connections = conns,
             UiEvent::OperationMode(mode) => {
                 self.operation_mode = match mode {
-                    tui_node::core::OperationMode::Online => "online",
-                    tui_node::core::OperationMode::Offline => "offline",
-                    tui_node::core::OperationMode::Hybrid => "hybrid",
+                    starlab_client::core::OperationMode::Online => "online",
+                    starlab_client::core::OperationMode::Offline => "offline",
+                    starlab_client::core::OperationMode::Hybrid => "hybrid",
                 }
                 .to_string();
             }

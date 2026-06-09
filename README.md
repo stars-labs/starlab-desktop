@@ -1,12 +1,12 @@
 # Starlab Desktop
 
 Native desktop **MPC wallet** — an [Iced](https://iced.rs) GUI (MIT) over the
-[`frost-mpc`](https://github.com/stars-labs/frost-mpc) FROST threshold-signing
+[`starlab-mpc`](https://github.com/stars-labs/starlab-mpc) FROST threshold-signing
 engine. Create and use a multi-device wallet whose key is split across devices
 (FROST DKG + threshold signing over a WebRTC mesh); no single device ever holds
 the whole key.
 
-It reuses `frost-mpc`'s `tui-node` library (the Elm core + `core::*Manager` +
+It reuses `starlab-mpc`'s `starlab-client` library (the Elm core + `core::*Manager` +
 `HeadlessRunner`) as its business-logic backend — same real DKG / signing /
 keystore code as the terminal client, a different shell.
 
@@ -24,20 +24,20 @@ for your platform.
 ## Architecture
 
 ```
-view(&State)->Element<Message>  <->  update(&mut State, Message)  <->  core_adapter.rs  ->  tui_node::core::*Manager
+view(&State)->Element<Message>  <->  update(&mut State, Message)  <->  core_adapter.rs  ->  starlab_client::core::*Manager
    ▲ widgets emit Message               ▲ Message::Ui(UiEvent)              | UICallback events
    |        Subscription::run(ui_bridge)─┘                                   ↓
    |<─────── reads the mpsc receiver ◄── NativeUICallback (ui_callback.rs) sends UiEvent
 ```
 
 - **Elm structure** (`State` / `Message` / `update` / `view`) maps onto the
-  `frost-mpc` Elm core.
+  `starlab-mpc` Elm core.
 - **Async→UI bridge**: `NativeUICallback` pushes `UiEvent`s into a
   `tokio::sync::mpsc` channel; an Iced `Subscription` drains them into
   `Message::Ui`. `Send`-clean, no event-loop handle juggling.
-- **`core_adapter.rs`** wraps `tui_node::core::*` managers (UI-agnostic).
-- **SD-card air-gap**: export/import dirs `frost_mpc_export` / `frost_mpc_import`
-  — MUST match `frost-mpc`'s `tui-node` `offline_manager.rs` for desktop↔TUI
+- **`core_adapter.rs`** wraps `starlab_client::core::*` managers (UI-agnostic).
+- **SD-card air-gap**: export/import dirs `starlab_export` / `starlab_import`
+  — MUST match `starlab-mpc`'s `starlab-client` `offline_manager.rs` for desktop↔TUI
   interop.
 
 ## Status
@@ -45,10 +45,10 @@ view(&State)->Element<Message>  <->  update(&mut State, Message)  <->  core_adap
 Ported from Slint to Iced (Slint's licensing is unsuitable for a proprietary
 product). All screens render and primary actions are wired. Known gaps:
 `SigningManager::approve` is a stub pending a ciphersuite-generic signing
-backend in `frost-mpc`; two secondary screens (per-participant DKG round table,
+backend in `starlab-mpc`; two secondary screens (per-participant DKG round table,
 pending-SD-ops list) are `// TODO(iced)` and currently drop their event data.
 
 ## Dependency note
 
-`tui-node` is pinned to `frost-mpc` `main` (a git dependency). For releases,
+`starlab-client` is pinned to `starlab-mpc` `main` (a git dependency). For releases,
 pin it to a tag or rev.
