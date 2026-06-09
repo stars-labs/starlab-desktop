@@ -56,6 +56,39 @@ fn dkg_round_progress(round: &tui_node::elm::message::DKGRound) -> (u8, f32) {
     }
 }
 
+/// Group the model's per-curve wallet entries by `wallet_id` and derive EVERY
+/// chain address for each (secp256k1 → Ethereum + Bitcoin; ed25519 → Solana +
+/// Sui). A unified wallet has two metadata entries (one per curve) under one id,
+/// so it ends up with all four chains in a single row.
+fn rich_wallets(model: &Model) -> Vec<crate::ui_callback::WalletView> {
+    use crate::ui_callback::WalletView;
+    use std::collections::BTreeMap;
+    let mut by_id: BTreeMap<String, WalletView> = BTreeMap::new();
+    for m in &model.wallet_state.wallets {
+        let view = by_id.entry(m.session_id.clone()).or_insert_with(|| WalletView {
+            id: m.session_id.clone(),
+            name: m.display_name().to_string(),
+            threshold: format!("{}/{}", m.threshold, m.total_participants),
+            chains: Vec::new(),
+        });
+        let chains: &[(&str, &str)] = if m.curve_type == "ed25519" {
+            &[("Solana", "solana"), ("Sui", "sui")]
+        } else {
+            &[("Ethereum", "ethereum"), ("Bitcoin", "bitcoin")]
+        };
+        if let Ok(gk) = hex::decode(&m.group_public_key) {
+            for (label, chain) in chains {
+                if let Ok(addr) =
+                    tui_node::blockchain_config::generate_address_for_chain(&gk, &m.curve_type, chain)
+                {
+                    view.chains.push((label.to_string(), addr));
+                }
+            }
+        }
+    }
+    by_id.into_values().collect()
+}
+
 /// Map an Elm `Model` into the core `WalletInfo` list the Slint UI renders.
 /// The on-disk address isn't stored in metadata (only the group key), so we
 /// leave `address` blank for now — the wallet still shows its name/threshold,
@@ -110,6 +143,10 @@ impl CoreAdapter {
         curve: String,
     ) -> Self {
         let state = Arc::new(CoreState::new());
+        // Keep a raw sender for events that aren't on the `UICallback` trait
+        // (the multi-chain WalletsRich list — the trait's update_wallets is
+        // single-address, and `ui_callback` below is a `dyn` trait object).
+        let ui_tx_rich = ui_tx.clone();
         let ui_callback: Arc<dyn UICallback> = Arc::new(NativeUICallback::new(ui_tx));
 
         // on_sync: mirror the runner's model into the UI after every
@@ -120,6 +157,8 @@ impl CoreAdapter {
         let on_sync = move |model: &Model, _msg: Option<&tui_node::elm::Message>| {
             let cb = cb_for_sync.clone();
             let wallets = model_wallets(model);
+            // Multi-chain wallet list straight down the channel (not a trait method).
+            let _ = ui_tx_rich.send(UiEvent::WalletsRich(rich_wallets(model)));
             let connected = model.network_state.connected;
             // Real DKG progress from the model (not a hardcoded 50%): active
             // tracks `dkg_in_progress` (flips false on finalize/abort, so the

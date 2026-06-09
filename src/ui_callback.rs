@@ -21,6 +21,18 @@ use tui_node::core::{
     SigningState, UICallback, WalletInfo,
 };
 
+/// A wallet grouped across curves for display: one entry per `wallet_id`, with
+/// every chain address it can derive (secp256k1 → Ethereum + Bitcoin; ed25519 →
+/// Solana + Sui; a unified wallet has all four).
+#[derive(Debug, Clone)]
+pub struct WalletView {
+    pub id: String,
+    pub name: String,
+    pub threshold: String,
+    /// (chain label, address) — e.g. ("Ethereum", "0x…"), ("Solana", "…").
+    pub chains: Vec<(String, String)>,
+}
+
 /// One UI-state mutation pushed from the async core into the Iced app.
 ///
 /// Each variant maps 1:1 onto a `UICallback` trait method. The Iced
@@ -31,6 +43,8 @@ pub enum UiEvent {
     MeshConnections(Vec<ConnectionInfo>),
     OperationMode(OperationMode),
     Wallets(Vec<WalletInfo>),
+    /// Multi-chain wallet list (grouped by id) — drives the wallet selector.
+    WalletsRich(Vec<WalletView>),
     ActiveWallet(usize),
     AvailableSessions(Vec<SessionInfo>),
     ActiveSession(Option<SessionInfo>),

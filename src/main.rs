@@ -26,7 +26,7 @@ use iced::widget::{
 use iced::{Color, Element, Length, Subscription, Task, Theme};
 
 use core_adapter::CoreAdapter;
-use tui_node::core::{ConnectionInfo, SessionInfo, SessionStatus, SigningState, WalletInfo};
+use tui_node::core::{ConnectionInfo, SessionInfo, SessionStatus, SigningState};
 use ui_callback::UiEvent;
 
 // ---------------------------------------------------------------------------
@@ -110,8 +110,8 @@ pub struct State {
     mesh_connections: Vec<ConnectionInfo>,
     operation_mode: String,
 
-    // Wallet state
-    wallets: Vec<WalletInfo>,
+    // Wallet state (grouped multi-chain view: one entry per wallet_id)
+    wallets: Vec<crate::ui_callback::WalletView>,
     active_wallet_index: usize,
     has_keystore: bool,
 
@@ -416,7 +416,14 @@ impl State {
                 .to_string();
             }
             UiEvent::Wallets(wallets) => {
+                // Single-address list (trait callback) — used only as a
+                // has-keystore signal; the displayed list comes from WalletsRich.
                 self.has_keystore = !wallets.is_empty();
+            }
+            UiEvent::WalletsRich(wallets) => {
+                if !wallets.is_empty() {
+                    self.has_keystore = true;
+                }
                 self.wallets = wallets;
             }
             UiEvent::ActiveWallet(i) => self.active_wallet_index = i,
@@ -598,22 +605,25 @@ impl State {
         } else {
             for (i, w) in self.wallets.iter().enumerate() {
                 let selected = i == self.active_wallet_index;
-                let label = format!(
-                    "{} · {} · {} · {}",
-                    w.name,
-                    w.chain,
-                    w.threshold,
-                    short_addr(&w.address),
-                );
-                let mut b = button(text(label).size(13))
+                let header = format!("{} · {}", w.name, w.threshold);
+                let mut b = button(text(header).size(13))
                     .width(Length::Fill)
                     .on_press(Message::WalletSelected(i));
-                if selected {
-                    b = b.style(button::primary);
+                b = if selected {
+                    b.style(button::primary)
                 } else {
-                    b = b.style(button::secondary);
+                    b.style(button::secondary)
+                };
+                // One line per chain this wallet can derive (ETH/BTC/SOL/Sui).
+                let mut col = Column::new().spacing(2).push(b);
+                for (chain, addr) in &w.chains {
+                    col = col.push(
+                        text(format!("{}  {}", chain, short_addr(addr)))
+                            .size(11)
+                            .color(muted()),
+                    );
                 }
-                list = list.push(b);
+                list = list.push(col);
             }
         }
 
