@@ -125,7 +125,12 @@ impl CoreAdapter {
             // tracks `dkg_in_progress` (flips false on finalize/abort, so the
             // bar resets instead of sticking), round + percent come from the
             // current `dkg_round` phase.
-            let active = model.wallet_state.dkg_in_progress;
+            // `Complete` means the wallet finalized — show idle even if the
+            // engine hasn't flipped `dkg_in_progress` back to false on this
+            // finalize path (otherwise the bar sticks at 100% "in progress").
+            let dkg_done =
+                matches!(model.wallet_state.dkg_round, tui_node::elm::message::DKGRound::Complete);
+            let active = model.wallet_state.dkg_in_progress && !dkg_done;
             let (round, progress) = dkg_round_progress(&model.wallet_state.dkg_round);
             tokio::spawn(async move {
                 cb.update_wallets(wallets).await;
