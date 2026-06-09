@@ -180,8 +180,16 @@ impl CoreAdapter {
         let runner_tx = if curve == "ed25519" {
             spawn_ed25519(device_id.clone(), keystore_path, signal_url, on_sync)
         } else {
+            // "unified" and "secp256k1" both spawn on the secp256k1 runner; the
+            // generic `C` DKG fields are unused on the unified path (UnifiedDkg
+            // lives in app_state.unified_dkg).
             spawn_secp256k1(device_id.clone(), keystore_path, signal_url, on_sync)
         };
+        // Unified mode = one ceremony → both curves (ETH+BTC + SOL+Sui in one
+        // wallet). Flip the model into unified mode like the CLI's `--curve unified`.
+        if curve == "unified" {
+            let _ = runner_tx.send(tui_node::elm::message::Message::SetUnifiedMode { unified: true });
+        }
 
         Self {
             session_manager: Arc::new(SessionManager::new(state.clone(), ui_callback.clone())),
