@@ -42,6 +42,20 @@ pub struct CoreAdapter {
     dkg_password: Arc<std::sync::Mutex<String>>,
 }
 
+/// Map the current FROST DKG phase to a (round, 0.0..=1.0 progress) pair for
+/// the progress bar. Mirrors the percentages the engine logs at each transition.
+fn dkg_round_progress(round: &tui_node::elm::message::DKGRound) -> (u8, f32) {
+    use tui_node::elm::message::DKGRound::*;
+    match round {
+        Initialization => (0, 0.10),
+        WaitingForParticipants => (0, 0.20),
+        Round1 => (1, 0.40),
+        Round2 => (2, 0.65),
+        Finalization => (2, 0.85),
+        Complete => (2, 1.0),
+    }
+}
+
 /// Map an Elm `Model` into the core `WalletInfo` list the Slint UI renders.
 /// The on-disk address isn't stored in metadata (only the group key), so we
 /// leave `address` blank for now — the wallet still shows its name/threshold,
@@ -107,12 +121,16 @@ impl CoreAdapter {
             let cb = cb_for_sync.clone();
             let wallets = model_wallets(model);
             let connected = model.network_state.connected;
-            let dkg_active = model.active_session.is_some();
+            // Real DKG progress from the model (not a hardcoded 50%): active
+            // tracks `dkg_in_progress` (flips false on finalize/abort, so the
+            // bar resets instead of sticking), round + percent come from the
+            // current `dkg_round` phase.
+            let active = model.wallet_state.dkg_in_progress;
+            let (round, progress) = dkg_round_progress(&model.wallet_state.dkg_round);
             tokio::spawn(async move {
                 cb.update_wallets(wallets).await;
                 cb.update_connection_status(connected, false).await;
-                cb.update_dkg_status(dkg_active, 0, if dkg_active { 0.5 } else { 0.0 })
-                    .await;
+                cb.update_dkg_status(active, round, progress).await;
             });
         };
         let runner_tx = if curve == "ed25519" {
