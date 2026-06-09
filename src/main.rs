@@ -39,7 +39,7 @@ fn main() -> iced::Result {
         .init();
 
     iced::application(State::new, State::update, State::view)
-        .title("FROST MPC Wallet — Native")
+        .title("Starlab Desktop")
         .theme(State::theme)
         .subscription(State::subscription)
         .run()
@@ -515,8 +515,8 @@ impl State {
 
     fn header(&self) -> Element<'_, Message> {
         let title = column![
-            text("FROST MPC Wallet").size(24),
-            text("Native Edition").size(12).color(muted()),
+            text("Starlab Desktop").size(24),
+            text("MPC Wallet").size(12).color(muted()),
         ]
         .spacing(2);
 
