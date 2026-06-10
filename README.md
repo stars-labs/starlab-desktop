@@ -43,10 +43,12 @@ view(&State)->Element<Message>  <->  update(&mut State, Message)  <->  core_adap
 ## Status
 
 Ported from Slint to Iced (Slint's licensing is unsuitable for a proprietary
-product). All screens render and primary actions are wired. Known gaps:
-`SigningManager::approve` is a stub pending a ciphersuite-generic signing
-backend in `starlab-mpc`; two secondary screens (per-participant DKG round table,
-pending-SD-ops list) are `// TODO(iced)` and currently drop their event data.
+product). All screens render and primary actions are wired. **Approve & Sign
+runs the real FROST ceremony** via `starlab-mpc`'s `SigningBackend` (the same
+elm signing path the TUI/CLI use). Remaining gaps: two secondary screens
+(per-participant DKG round table, pending-SD-ops list) are `// TODO(iced)`
+and currently drop their event data; live multi-device signing from the GUI
+still needs an on-device verification pass.
 
 ## Dependency note
 
