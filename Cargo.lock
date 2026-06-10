@@ -2313,6 +2313,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "frost-secp256k1-tr"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff8a25b14bfd5d25deba5edce61ec99c3afb752a1d26630a196bba4cb1c4ca5e"
+dependencies = [
+ "document-features",
+ "frost-core",
+ "frost-rerandomized",
+ "k256",
+ "rand_core 0.6.4",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "funty"
 version = "2.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2778,7 +2792,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -6971,7 +6985,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "starlab-client"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#ad72609b66571d29cc005ce17732d63977bfd52a"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#e9a5460f3ac666ea9305997d6b6189a349c21702"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -7019,7 +7033,7 @@ dependencies = [
 [[package]]
 name = "starlab-core"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#ad72609b66571d29cc005ce17732d63977bfd52a"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#e9a5460f3ac666ea9305997d6b6189a349c21702"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -7028,6 +7042,7 @@ dependencies = [
  "frost-core",
  "frost-ed25519",
  "frost-secp256k1",
+ "frost-secp256k1-tr",
  "getrandom 0.4.2",
  "hex",
  "hkdf 0.13.0",
@@ -7064,7 +7079,7 @@ dependencies = [
 [[package]]
 name = "starlab-signal-server"
 version = "0.1.1"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#ad72609b66571d29cc005ce17732d63977bfd52a"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#e9a5460f3ac666ea9305997d6b6189a349c21702"
 dependencies = [
  "futures-util",
  "serde",

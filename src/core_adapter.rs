@@ -6,6 +6,7 @@ use starlab_client::core::{
     dkg_manager::DkgManager,
     offline_manager::OfflineManager,
     session_manager::SessionManager,
+    signing_backend::{ElmSigningBackend, SigningEventSink},
     signing_manager::SigningManager,
     wallet_manager::WalletManager,
     CoreState, UICallback, WalletInfo,
@@ -154,7 +155,19 @@ impl CoreAdapter {
         // pushes are spawned since on_sync itself is synchronous. Curve-agnostic
         // (operates on Model), so it's shared by both spawn fns below.
         let cb_for_sync = ui_callback.clone();
-        let on_sync = move |model: &Model, _msg: Option<&starlab_client::elm::Message>| {
+        // Signing backend sink (#94): the backend is constructed AFTER spawn
+        // (it needs runner_tx), so on_sync reads it through a late-bound slot.
+        let sink_slot: Arc<std::sync::Mutex<Option<SigningEventSink>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let sink_for_sync = sink_slot.clone();
+        let on_sync = move |model: &Model, msg: Option<&starlab_client::elm::Message>| {
+            if let Some(m) = msg {
+                if let Ok(guard) = sink_for_sync.lock() {
+                    if let Some(sink) = guard.as_ref() {
+                        sink.observe(m);
+                    }
+                }
+            }
             let cb = cb_for_sync.clone();
             let wallets = model_wallets(model);
             // Multi-chain wallet list straight down the channel (not a trait method).
@@ -202,7 +215,16 @@ impl CoreAdapter {
             dkg_manager: Arc::new(DkgManager::new(state.clone(), ui_callback.clone())),
             wallet_manager: Arc::new(WalletManager::new(state.clone(), ui_callback.clone())),
             offline_manager: Arc::new(OfflineManager::new(state.clone(), ui_callback.clone())),
-            signing_manager: Arc::new(SigningManager::new(state.clone(), ui_callback.clone())),
+            signing_manager: {
+                // Real FROST signing (#94): SigningManager drives the SAME elm
+                // loop the TUI/CLI use, via the backend over runner_tx.
+                let (backend, sink) = ElmSigningBackend::new(runner_tx.clone());
+                *sink_slot.lock().unwrap() = Some(sink);
+                Arc::new(
+                    SigningManager::new(state.clone(), ui_callback.clone())
+                        .with_backend(backend),
+                )
+            },
             state,
             ui_callback,
             runner_tx,
@@ -242,11 +264,21 @@ impl CoreAdapter {
     }
 
     /// User approved the pending signing request from the confirm
-    /// modal. Drives state through commitment / share / aggregate.
+    /// modal. Runs the REAL FROST ceremony (commitment / share / aggregate
+    /// over the mesh) via the SigningBackend (#94). The share password is
+    /// the one the user set for this device's keystore (same field the DKG
+    /// flow uses); it goes to the backend and is never stored beyond that.
     pub async fn approve_signing(&self, request_id: String) -> Result<(), String> {
+        let password = self.dkg_password();
+        if password.is_empty() {
+            return Err(
+                "set the wallet password first (same one used at create/join)".to_string(),
+            );
+        }
         self.signing_manager
-            .approve(&request_id)
+            .approve_and_sign(&request_id, password)
             .await
+            .map(|_sig| ())
             .map_err(|e| e.to_string())
     }
 
