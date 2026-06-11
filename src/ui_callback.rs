@@ -22,15 +22,20 @@ use starlab_client::core::{
 };
 
 /// A wallet grouped across curves for display: one entry per `wallet_id`, with
-/// every chain address it can derive (secp256k1 → Ethereum + Bitcoin; ed25519 →
-/// Solana + Sui; a unified wallet has all four).
+/// the group key of every curve it holds (secp256k1 → Ethereum + Bitcoin;
+/// ed25519 → Solana + Sui; a unified wallet has both curves). Addresses are
+/// NOT carried here — the view derives them per BIP-44 account from the group
+/// key via `starlab_core::accounts` (public-only, cheap), so switching
+/// accounts is a pure `State` change with no async round-trip. The root
+/// group-key address is never shown: account 0 is the default identity.
 #[derive(Debug, Clone)]
 pub struct WalletView {
     pub id: String,
     pub name: String,
     pub threshold: String,
-    /// (chain label, address) — e.g. ("Ethereum", "0x…"), ("Solana", "…").
-    pub chains: Vec<(String, String)>,
+    /// (curve_type, group_public_key_hex) — one entry per curve this wallet
+    /// holds ("secp256k1" / "ed25519"; a unified wallet has both).
+    pub keys: Vec<(String, String)>,
 }
 
 /// One UI-state mutation pushed from the async core into the Iced app.
