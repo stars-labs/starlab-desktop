@@ -57,10 +57,12 @@ fn dkg_round_progress(round: &starlab_client::elm::message::DKGRound) -> (u8, f3
     }
 }
 
-/// Group the model's per-curve wallet entries by `wallet_id` and derive EVERY
-/// chain address for each (secp256k1 → Ethereum + Bitcoin; ed25519 → Solana +
-/// Sui). A unified wallet has two metadata entries (one per curve) under one id,
-/// so it ends up with all four chains in a single row.
+/// Group the model's per-curve wallet entries by `wallet_id`, carrying each
+/// curve's GROUP KEY (not addresses). A unified wallet has two metadata
+/// entries (one per curve) under one id, so it ends up with both keys in a
+/// single row. The view layer derives the displayed addresses per BIP-44
+/// account from these keys via `starlab_core::accounts::account_addresses`
+/// — the root group-key address is never derived for display.
 fn rich_wallets(model: &Model) -> Vec<crate::ui_callback::WalletView> {
     use crate::ui_callback::WalletView;
     use std::collections::BTreeMap;
@@ -70,22 +72,10 @@ fn rich_wallets(model: &Model) -> Vec<crate::ui_callback::WalletView> {
             id: m.session_id.clone(),
             name: m.display_name().to_string(),
             threshold: format!("{}/{}", m.threshold, m.total_participants),
-            chains: Vec::new(),
+            keys: Vec::new(),
         });
-        let chains: &[(&str, &str)] = if m.curve_type == "ed25519" {
-            &[("Solana", "solana"), ("Sui", "sui")]
-        } else {
-            &[("Ethereum", "ethereum"), ("Bitcoin", "bitcoin")]
-        };
-        if let Ok(gk) = hex::decode(&m.group_public_key) {
-            for (label, chain) in chains {
-                if let Ok(addr) =
-                    starlab_client::blockchain_config::generate_address_for_chain(&gk, &m.curve_type, chain)
-                {
-                    view.chains.push((label.to_string(), addr));
-                }
-            }
-        }
+        view.keys
+            .push((m.curve_type.clone(), m.group_public_key.clone()));
     }
     by_id.into_values().collect()
 }
@@ -102,17 +92,15 @@ fn model_wallets(model: &Model) -> Vec<WalletInfo> {
         .map(|m| WalletInfo {
             id: m.session_id.clone(),
             name: m.display_name().to_string(),
-            // Derive the primary chain address from the group key (#18).
+            // Primary chain address of ACCOUNT 0 (BIP-44) — never the root
+            // group-key address, which is not a displayable identity.
             address: {
-                let chain = if m.curve_type == "ed25519" { "solana" } else { "ethereum" };
                 hex::decode(&m.group_public_key)
                     .ok()
                     .and_then(|b| {
-                        starlab_client::blockchain_config::generate_address_for_chain(
-                            &b, &m.curve_type, chain,
-                        )
-                        .ok()
+                        starlab_core::accounts::account_addresses(&m.curve_type, &b, 0).ok()
                     })
+                    .and_then(|addrs| addrs.into_iter().next().map(|(_, _, addr)| addr))
                     .unwrap_or_default()
             },
             balance: String::new(),

@@ -18,6 +18,11 @@ iced = { version = "0.14", features = ["tokio"] }
 # from the engine repo as a git dependency. Pin to a tag/rev for releases.
 starlab-client = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }
 
+# The account model (BIP-44 paths + public-only per-account address
+# derivation) — single source of truth shared by every client. Used directly
+# by the view layer so switching accounts is a pure local re-derivation.
+starlab-core = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }
+
 hex = "0.4"
 
 # Async runtime for the core managers + the mpsc UICallback bridge +

@@ -71,6 +71,11 @@ pub enum Message {
     SignChainChanged(String),
     JoinSessionIdChanged(String),
     WalletSelected(usize),
+    /// Switch the displayed BIP-44 account — addresses are re-derived
+    /// locally in the view from the wallet's group key (no async hop).
+    SelectAccount(u32),
+    /// Reveal one more account in the picker (the `＋` button).
+    AddAccount,
 
     // --- Actions (were Slint callbacks) ---
     ConnectWebsocket,
@@ -114,6 +119,11 @@ pub struct State {
     wallets: Vec<crate::ui_callback::WalletView>,
     active_wallet_index: usize,
     has_keystore: bool,
+    /// The BIP-44 account whose addresses are displayed (account 0 is the
+    /// default identity; the root group-key address is never shown).
+    selected_account: u32,
+    /// Highest account index the picker offers; `＋` reveals one more.
+    max_account: u32,
 
     // Session state
     available_sessions: Vec<SessionInfo>,
@@ -212,6 +222,8 @@ impl State {
             wallets: Vec::new(),
             active_wallet_index: 0,
             has_keystore: false,
+            selected_account: 0,
+            max_account: 2,
             available_sessions: Vec::new(),
             active_session: None,
             dkg_active: false,
@@ -297,6 +309,16 @@ impl State {
             }
             Message::WalletSelected(i) => {
                 self.active_wallet_index = i;
+                Task::none()
+            }
+            Message::SelectAccount(i) => {
+                self.selected_account = i;
+                Task::none()
+            }
+            Message::AddAccount => {
+                // Reveal + jump straight to the new account.
+                self.max_account += 1;
+                self.selected_account = self.max_account;
                 Task::none()
             }
 
@@ -603,6 +625,25 @@ impl State {
         if self.wallets.is_empty() {
             list = list.push(text("No wallets — create or import one.").size(12).color(muted()));
         } else {
+            // BIP-44 account picker: [Account 0] [Account 1] … [＋]. Switching
+            // is a pure State change — addresses below re-derive in this view.
+            let mut accounts = iced::widget::Row::new().spacing(6);
+            for i in 0..=self.max_account {
+                let mut b = button(text(format!("Account {i}")).size(11))
+                    .on_press(Message::SelectAccount(i));
+                b = if i == self.selected_account {
+                    b.style(button::primary)
+                } else {
+                    b.style(button::secondary)
+                };
+                accounts = accounts.push(b);
+            }
+            accounts = accounts
+                .push(button(text("＋").size(11)).on_press(Message::AddAccount));
+            list = list.push(scrollable(accounts).direction(
+                scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
+            ));
+
             for (i, w) in self.wallets.iter().enumerate() {
                 let selected = i == self.active_wallet_index;
                 let header = format!("{} · {}", w.name, w.threshold);
@@ -614,14 +655,32 @@ impl State {
                 } else {
                     b.style(button::secondary)
                 };
-                // One line per chain this wallet can derive (ETH/BTC/SOL/Sui).
+                // One line per chain address of the selected account
+                // (ETH/BTC/SOL/Sui), derived from the group key via the
+                // engine's account model — never the root group-key address.
+                // The BIP-44 path is shown faintly next to each address.
                 let mut col = Column::new().spacing(2).push(b);
-                for (chain, addr) in &w.chains {
-                    col = col.push(
-                        text(format!("{}  {}", chain, short_addr(addr)))
-                            .size(11)
-                            .color(muted()),
-                    );
+                for (curve, gk_hex) in &w.keys {
+                    let Ok(gk) = hex::decode(gk_hex) else { continue };
+                    let Ok(addrs) = starlab_core::accounts::account_addresses(
+                        curve,
+                        &gk,
+                        self.selected_account,
+                    ) else {
+                        continue;
+                    };
+                    for (chain, path, addr) in addrs {
+                        col = col.push(
+                            row![
+                                text(format!("{}  {}", chain, short_addr(&addr)))
+                                    .size(11)
+                                    .color(muted()),
+                                text(path).size(10).color(faint()),
+                            ]
+                            .spacing(8)
+                            .align_y(iced::Alignment::Center),
+                        );
+                    }
                 }
                 list = list.push(col);
             }

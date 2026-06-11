@@ -2792,7 +2792,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -6985,7 +6985,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "starlab-client"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#e9a5460f3ac666ea9305997d6b6189a349c21702"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#dab947a33b95425754168603a40f69e88c86d831"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -7033,11 +7033,12 @@ dependencies = [
 [[package]]
 name = "starlab-core"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#e9a5460f3ac666ea9305997d6b6189a349c21702"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#dab947a33b95425754168603a40f69e88c86d831"
 dependencies = [
  "aes-gcm",
  "argon2",
  "base64",
+ "bech32",
  "bs58",
  "frost-core",
  "frost-ed25519",
@@ -7052,6 +7053,7 @@ dependencies = [
  "pbkdf2 0.12.2",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+ "ripemd",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -7071,6 +7073,7 @@ dependencies = [
  "rfd",
  "serde_json",
  "starlab-client",
+ "starlab-core",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -7079,7 +7082,7 @@ dependencies = [
 [[package]]
 name = "starlab-signal-server"
 version = "0.1.1"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#e9a5460f3ac666ea9305997d6b6189a349c21702"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#dab947a33b95425754168603a40f69e88c86d831"
 dependencies = [
  "futures-util",
  "serde",
