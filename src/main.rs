@@ -313,8 +313,13 @@ impl State {
             Message::WsUrlChanged(v) => {
                 let (base, room) = split_signal_room(&v);
                 self.ws_url = base;
-                if let Some(room) = room {
-                    self.signal_room = room;
+                // BUG 3: only overwrite signal_room when the URL actually
+                // contains a non-empty room= param, so that typing in the
+                // URL field doesn't silently destroy a previously-set room.
+                if let Some(r) = room {
+                    if !r.is_empty() {
+                        self.signal_room = r;
+                    }
                 }
                 Task::none()
             }
@@ -509,6 +514,15 @@ impl State {
                             | PendingAction::ImportWallet
                             | PendingAction::ExportWallet
                             | PendingAction::Sign
+                            // BUG 5: CreateWallet and JoinWallet are fire-and-
+                            // forget sends: the async action completes as soon
+                            // as the message is queued to the core. If the send
+                            // succeeds (Ok(())) we must clear pending_action here
+                            // because no subsequent UiEvent::WalletsRich fires on
+                            // a simple send error path — leaving pending_action
+                            // set would permanently lock the UI spinner.
+                            | PendingAction::CreateWallet
+                            | PendingAction::JoinWallet
                     )
                 ) {
                     self.pending_action = None;
@@ -1209,7 +1223,11 @@ impl State {
                         .width(Length::Fill),
                     button(text("New room")).on_press(Message::GenerateSignalRoom),
                     button(text("Copy")).on_press(Message::CopyRoomId),
-                    button(text("Connect")).on_press(Message::ConnectWebsocket),
+                    // BUG 4: disable when already connected (mirrors the
+                    // home-tab Connect button that gates on websocket_connected).
+                    button(text("Connect")).on_press_maybe(
+                        (!self.websocket_connected).then_some(Message::ConnectWebsocket),
+                    ),
                 ]
                 .spacing(8),
                 row![
@@ -1330,7 +1348,13 @@ fn normalize_room_id(input: &str) -> String {
 
 fn split_signal_room(input: &str) -> (String, Option<String>) {
     let url = input.trim();
-    let Some(room_key) = url.find("room=") else {
+    // BUG 1: only match `room=` when preceded by `?` or `&` to avoid
+    // false-matching substrings like `chatroom=` or `showroom=`.
+    let room_key = url
+        .match_indices("room=")
+        .find(|&(pos, _)| pos == 0 || matches!(url.as_bytes().get(pos - 1), Some(b'?' | b'&')))
+        .map(|(pos, _)| pos);
+    let Some(room_key) = room_key else {
         return (url.to_string(), None);
     };
 
@@ -1344,6 +1368,10 @@ fn split_signal_room(input: &str) -> (String, Option<String>) {
     let mut base = format!("{}{}", &url[..room_key], &url[value_end..]);
     while base.contains("?&") {
         base = base.replace("?&", "?");
+    }
+    // BUG 2: normalize `&&` that can appear when removing a middle param.
+    while base.contains("&&") {
+        base = base.replace("&&", "&");
     }
     while base.ends_with('?') || base.ends_with('&') {
         base.pop();
