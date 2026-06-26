@@ -7068,6 +7068,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "frost-ed25519",
+ "frost-secp256k1",
  "hex",
  "iced",
  "rfd",
@@ -7077,6 +7079,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

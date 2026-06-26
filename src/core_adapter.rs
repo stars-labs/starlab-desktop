@@ -1,19 +1,20 @@
 //! Adapter to integrate TUI node's shared core with native UI
 
-use std::sync::Arc;
-use tokio::sync::mpsc::UnboundedSender;
+use starlab_client::AppState;
 use starlab_client::core::{
+    CoreState, SessionInfo, SessionStatus, UICallback, WalletInfo,
     dkg_manager::DkgManager,
     offline_manager::OfflineManager,
     session_manager::SessionManager,
     signing_backend::{ElmSigningBackend, SigningEventSink},
     signing_manager::SigningManager,
     wallet_manager::WalletManager,
-    CoreState, UICallback, WalletInfo,
 };
-use starlab_client::elm::headless::{spawn_ed25519, spawn_secp256k1};
+use starlab_client::elm::headless::HeadlessRunner;
 use starlab_client::elm::model::{WalletConfig, WalletMode};
 use starlab_client::elm::{Message, Model};
+use std::sync::Arc;
+use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
 use crate::ui_callback::{NativeUICallback, UiEvent};
 
@@ -24,6 +25,76 @@ use crate::ui_callback::{NativeUICallback, UiEvent};
 /// join over the signal server.
 const DEFAULT_TOTAL: u16 = 3;
 const DEFAULT_THRESHOLD: u16 = 2;
+
+enum RunnerControl {
+    Secp256k1(Arc<Mutex<AppState<frost_secp256k1::Secp256K1Sha256>>>),
+    Ed25519(Arc<Mutex<AppState<frost_ed25519::Ed25519Sha512>>>),
+}
+
+impl RunnerControl {
+    async fn set_signal_url(&self, signal_url: String) {
+        match self {
+            Self::Secp256k1(app_state) => {
+                app_state.lock().await.signal_server_url = signal_url;
+            }
+            Self::Ed25519(app_state) => {
+                app_state.lock().await.signal_server_url = signal_url;
+            }
+        }
+    }
+}
+
+fn spawn_secp256k1_runner<F>(
+    device_id: String,
+    keystore_path: String,
+    signal_url: String,
+    on_sync: F,
+) -> (UnboundedSender<Message>, RunnerControl)
+where
+    F: Fn(&Model, Option<&Message>) + Send + 'static,
+{
+    let app_state = Arc::new(Mutex::new(
+        AppState::<frost_secp256k1::Secp256K1Sha256>::with_device_id_and_server(
+            device_id.clone(),
+            signal_url,
+        ),
+    ));
+    let runner = HeadlessRunner::<frost_secp256k1::Secp256K1Sha256>::new(
+        device_id,
+        keystore_path,
+        app_state.clone(),
+        Box::new(on_sync),
+    );
+    let tx = runner.sender();
+    tokio::spawn(runner.run());
+    (tx, RunnerControl::Secp256k1(app_state))
+}
+
+fn spawn_ed25519_runner<F>(
+    device_id: String,
+    keystore_path: String,
+    signal_url: String,
+    on_sync: F,
+) -> (UnboundedSender<Message>, RunnerControl)
+where
+    F: Fn(&Model, Option<&Message>) + Send + 'static,
+{
+    let app_state = Arc::new(Mutex::new(
+        AppState::<frost_ed25519::Ed25519Sha512>::with_device_id_and_server(
+            device_id.clone(),
+            signal_url,
+        ),
+    ));
+    let runner = HeadlessRunner::<frost_ed25519::Ed25519Sha512>::new(
+        device_id,
+        keystore_path,
+        app_state.clone(),
+        Box::new(on_sync),
+    );
+    let tx = runner.sender();
+    tokio::spawn(runner.run());
+    (tx, RunnerControl::Ed25519(app_state))
+}
 
 /// Core adapter that manages all the shared business logic
 pub struct CoreAdapter {
@@ -38,6 +109,8 @@ pub struct CoreAdapter {
     /// connect / create-wallet / join-session (the managers above remain
     /// in place for the not-yet-ported features: signing, SD-card, etc.).
     runner_tx: UnboundedSender<Message>,
+    /// Mutable runner configuration that `ReconnectWebSocket` reads.
+    runner_control: RunnerControl,
     /// Keystore password used to encrypt this device's share at DKG time.
     /// Set from the UI's "Keystore password" field before create/join.
     dkg_password: Arc<std::sync::Mutex<String>>,
@@ -68,12 +141,14 @@ fn rich_wallets(model: &Model) -> Vec<crate::ui_callback::WalletView> {
     use std::collections::BTreeMap;
     let mut by_id: BTreeMap<String, WalletView> = BTreeMap::new();
     for m in &model.wallet_state.wallets {
-        let view = by_id.entry(m.session_id.clone()).or_insert_with(|| WalletView {
-            id: m.session_id.clone(),
-            name: m.display_name().to_string(),
-            threshold: format!("{}/{}", m.threshold, m.total_participants),
-            keys: Vec::new(),
-        });
+        let view = by_id
+            .entry(m.session_id.clone())
+            .or_insert_with(|| WalletView {
+                id: m.session_id.clone(),
+                name: m.display_name().to_string(),
+                threshold: format!("{}/{}", m.threshold, m.total_participants),
+                keys: Vec::new(),
+            });
         view.keys
             .push((m.curve_type.clone(), m.group_public_key.clone()));
     }
@@ -113,6 +188,21 @@ fn model_wallets(model: &Model) -> Vec<WalletInfo> {
             participants: m.participants.clone(),
         })
         .collect()
+}
+
+fn model_session_info(session: &starlab_client::protocal::signal::SessionInfo) -> SessionInfo {
+    SessionInfo {
+        session_id: session.session_id.clone(),
+        initiator: session.proposer_id.clone(),
+        participants: session.participants.clone(),
+        threshold: (session.threshold, session.total),
+        status: if session.participants.len() >= usize::from(session.total) {
+            SessionStatus::InProgress
+        } else {
+            SessionStatus::Waiting
+        },
+        created_at: String::new(),
+    }
 }
 
 impl CoreAdapter {
@@ -158,6 +248,12 @@ impl CoreAdapter {
             }
             let cb = cb_for_sync.clone();
             let wallets = model_wallets(model);
+            let active_session = model.active_session.as_ref().map(model_session_info);
+            let available_sessions = model
+                .session_invites
+                .iter()
+                .map(model_session_info)
+                .collect::<Vec<_>>();
             // Multi-chain wallet list straight down the channel (not a trait method).
             let _ = ui_tx_rich.send(UiEvent::WalletsRich(rich_wallets(model)));
             let connected = model.network_state.connected;
@@ -168,8 +264,10 @@ impl CoreAdapter {
             // `Complete` means the wallet finalized — show idle even if the
             // engine hasn't flipped `dkg_in_progress` back to false on this
             // finalize path (otherwise the bar sticks at 100% "in progress").
-            let dkg_done =
-                matches!(model.wallet_state.dkg_round, starlab_client::elm::message::DKGRound::Complete);
+            let dkg_done = matches!(
+                model.wallet_state.dkg_round,
+                starlab_client::elm::message::DKGRound::Complete
+            );
             let active = model.wallet_state.dkg_in_progress && !dkg_done;
             // Zero the bar when idle (otherwise the Initialization=10% mapping
             // leaves a stub bar showing under "DKG idle").
@@ -180,22 +278,25 @@ impl CoreAdapter {
             };
             tokio::spawn(async move {
                 cb.update_wallets(wallets).await;
+                cb.update_active_session(active_session).await;
+                cb.update_available_sessions(available_sessions).await;
                 cb.update_connection_status(connected, false).await;
                 cb.update_dkg_status(active, round, progress).await;
             });
         };
-        let runner_tx = if curve == "ed25519" {
-            spawn_ed25519(device_id.clone(), keystore_path, signal_url, on_sync)
+        let (runner_tx, runner_control) = if curve == "ed25519" {
+            spawn_ed25519_runner(device_id.clone(), keystore_path, signal_url, on_sync)
         } else {
             // "unified" and "secp256k1" both spawn on the secp256k1 runner; the
             // generic `C` DKG fields are unused on the unified path (UnifiedDkg
             // lives in app_state.unified_dkg).
-            spawn_secp256k1(device_id.clone(), keystore_path, signal_url, on_sync)
+            spawn_secp256k1_runner(device_id.clone(), keystore_path, signal_url, on_sync)
         };
         // Unified mode = one ceremony → both curves (ETH+BTC + SOL+Sui in one
         // wallet). Flip the model into unified mode like the CLI's `--curve unified`.
         if curve == "unified" {
-            let _ = runner_tx.send(starlab_client::elm::message::Message::SetUnifiedMode { unified: true });
+            let _ = runner_tx
+                .send(starlab_client::elm::message::Message::SetUnifiedMode { unified: true });
         }
 
         Self {
@@ -209,13 +310,13 @@ impl CoreAdapter {
                 let (backend, sink) = ElmSigningBackend::new(runner_tx.clone());
                 *sink_slot.lock().unwrap() = Some(sink);
                 Arc::new(
-                    SigningManager::new(state.clone(), ui_callback.clone())
-                        .with_backend(backend),
+                    SigningManager::new(state.clone(), ui_callback.clone()).with_backend(backend),
                 )
             },
             state,
             ui_callback,
             runner_tx,
+            runner_control,
             dkg_password: Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
@@ -259,9 +360,7 @@ impl CoreAdapter {
     pub async fn approve_signing(&self, request_id: String) -> Result<(), String> {
         let password = self.dkg_password();
         if password.is_empty() {
-            return Err(
-                "set the wallet password first (same one used at create/join)".to_string(),
-            );
+            return Err("set the wallet password first (same one used at create/join)".to_string());
         }
         self.signing_manager
             .approve_and_sign(&request_id, password)
@@ -303,15 +402,13 @@ impl CoreAdapter {
         };
 
         let sd_dir = handle.to_path_buf();
-        let filename = format!(
-            "{}_{}.json",
-            data_type,
-            chrono::Utc::now().timestamp()
-        );
+        let filename = format!("{}_{}.json", data_type, chrono::Utc::now().timestamp());
         let target = sd_dir.join("mpc_wallet_export").join(&filename);
 
         if let Some(parent) = target.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| e.to_string())?;
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| e.to_string())?;
         }
         // Placeholder content — swap for a real OfflineDataPackage
         // once the elm Message loop exposes its artefacts to core.
@@ -362,10 +459,7 @@ impl CoreAdapter {
         if !import_subdir.exists() {
             self.ui_callback
                 .show_message(
-                    format!(
-                        "No mpc_wallet_import/ directory under {}",
-                        sd_dir.display()
-                    ),
+                    format!("No mpc_wallet_import/ directory under {}", sd_dir.display()),
                     true,
                 )
                 .await;
@@ -385,7 +479,10 @@ impl CoreAdapter {
 
         self.ui_callback
             .show_message(
-                format!("Found {count} SD-card artefacts in {}", import_subdir.display()),
+                format!(
+                    "Found {count} SD-card artefacts in {}",
+                    import_subdir.display()
+                ),
                 false,
             )
             .await;
@@ -426,23 +523,34 @@ impl CoreAdapter {
         for sub in ["mpc_wallet_export", "mpc_wallet_import"] {
             let p = sd_dir.join(sub);
             if p.exists() {
-                tokio::fs::remove_dir_all(&p).await.map_err(|e| e.to_string())?;
+                tokio::fs::remove_dir_all(&p)
+                    .await
+                    .map_err(|e| e.to_string())?;
             }
         }
 
         self.state.pending_sd_operations.lock().await.clear();
         self.ui_callback.update_sd_operations(Vec::new()).await;
         self.ui_callback
-            .show_message(format!("Cleared SD-card data under {}", sd_dir.display()), false)
+            .show_message(
+                format!("Cleared SD-card data under {}", sd_dir.display()),
+                false,
+            )
             .await;
         Ok(())
     }
-    
-    /// Connect to WebSocket server
-    pub async fn connect_websocket(&self, _url: String) -> Result<(), String> {
-        // Real WebSocket dial via the headless Elm runner (reads the signal
-        // server URL configured at startup). The `_url` arg is ignored — the
-        // runner owns the connection config.
+
+    /// Connect to WebSocket server.
+    pub async fn connect_websocket(&self, url: String) -> Result<(), String> {
+        let url = url.trim().to_string();
+        if url.is_empty() {
+            return Err("signal server URL is empty".to_string());
+        }
+
+        // The shared reconnect command reads the URL from AppState, so update
+        // it first. This lets the desktop UI change room/server without
+        // requiring a process restart or environment variables.
+        self.runner_control.set_signal_url(url).await;
         self.runner_tx
             .send(Message::TriggerReconnect)
             .map_err(|e| e.to_string())
@@ -473,7 +581,7 @@ impl CoreAdapter {
             })
             .map_err(|e| e.to_string())
     }
-    
+
     /// Import a keystore from disk. Opens a native file-picker for
     /// the `.dat` path, then passes the user-supplied password to
     /// `WalletManager::import_wallet` for decryption. Pass `""` if
@@ -549,19 +657,19 @@ impl CoreAdapter {
             .await
             .map_err(|e| e.to_string())
     }
-    
+
     /// Create a new session
     pub async fn create_session(&self) -> Result<(), String> {
         // Get device ID (would be from config in real app)
         let device_id = "native-node-001".to_string();
-        
+
         self.session_manager
             .create_session(device_id, 2, 3)
             .await
             .map_err(|e| e.to_string())?;
         Ok(())
     }
-    
+
     /// Join an existing session
     pub async fn join_session(&self, session_id: String) -> Result<(), String> {
         // Real join via the headless Elm runner: contributes this device's
@@ -575,17 +683,17 @@ impl CoreAdapter {
             })
             .map_err(|e| e.to_string())
     }
-    
+
     /// Leave current session
     pub async fn leave_session(&self) -> Result<(), String> {
         let device_id = "native-node-001".to_string();
-        
+
         self.session_manager
             .leave_session(device_id)
             .await
             .map_err(|e| e.to_string())
     }
-    
+
     /// Refresh available sessions
     pub async fn refresh_sessions(&self) -> Result<(), String> {
         self.session_manager
@@ -593,7 +701,7 @@ impl CoreAdapter {
             .await
             .map_err(|e| e.to_string())
     }
-    
+
     /// Toggle offline mode
     pub async fn toggle_offline_mode(&self) -> Result<(), String> {
         self.offline_manager
@@ -601,22 +709,23 @@ impl CoreAdapter {
             .await
             .map_err(|e| e.to_string())
     }
-    
+
     /// Start DKG process
     pub async fn start_dkg(&self) -> Result<(), String> {
         // Get active session
-        let session = self.session_manager
+        let session = self
+            .session_manager
             .get_active_session()
             .await
             .ok_or_else(|| "No active session".to_string())?;
-        
+
         // Start DKG with session participants
         self.dkg_manager
             .start_dkg(session.threshold.0, session.participants)
             .await
             .map_err(|e| e.to_string())
     }
-    
+
     /// Abort DKG process
     pub async fn abort_dkg(&self) -> Result<(), String> {
         self.dkg_manager
