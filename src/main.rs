@@ -20,10 +20,8 @@ mod ui_callback;
 use std::sync::{Arc, Mutex as StdMutex};
 
 use iced::futures::stream;
-use iced::widget::{
-    button, column, container, row, scrollable, text, text_input, Column, Space,
-};
-use iced::{Color, Element, Length, Subscription, Task, Theme};
+use iced::widget::{Column, Space, button, column, container, row, scrollable, text, text_input};
+use iced::{clipboard, Background, Border, Color, Element, Length, Subscription, Task, Theme};
 
 use core_adapter::CoreAdapter;
 use starlab_client::core::{ConnectionInfo, SessionInfo, SessionStatus, SigningState};
@@ -57,6 +55,22 @@ pub enum Tab {
     Settings,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingAction {
+    Connect,
+    CreateWallet,
+    JoinWallet,
+    ImportWallet,
+    ExportWallet,
+    Sign,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalletFlow {
+    Create,
+    Join,
+}
+
 #[derive(Debug, Clone)]
 pub enum Message {
     // --- UI events pushed from the async core ---
@@ -64,9 +78,16 @@ pub enum Message {
 
     // --- Navigation / input ---
     TabSelected(Tab),
+    WalletFlowSelected(WalletFlow),
     NewWalletNameChanged(String),
     KeystorePasswordChanged(String),
     WsUrlChanged(String),
+    SignalRoomChanged(String),
+    GenerateSignalRoom,
+    CopyDeviceId,
+    CopyRoomId,
+    CopySignalUrl,
+    CopyInviteId,
     SignHexChanged(String),
     SignChainChanged(String),
     JoinSessionIdChanged(String),
@@ -150,13 +171,16 @@ pub struct State {
     // UI chrome
     device_id: String,
     status_message: String,
+    pending_action: Option<PendingAction>,
     log_messages: Vec<String>,
     active_tab: Tab,
+    wallet_flow: WalletFlow,
 
     // Input fields
     new_wallet_name: String,
     dkg_password: String,
     ws_url: String,
+    signal_room: String,
     sign_hex: String,
     sign_chain: String,
     join_session_id: String,
@@ -168,10 +192,7 @@ impl State {
         // the CoreAdapter (handed to NativeUICallback); the receiver is
         // stashed for the subscription to pull out exactly once.
         let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel::<UiEvent>();
-        BRIDGE_RX
-            .lock()
-            .expect("bridge mutex")
-            .replace(ui_rx);
+        BRIDGE_RX.lock().expect("bridge mutex").replace(ui_rx);
 
         let device_id =
             std::env::var("MPC_DEVICE_ID").unwrap_or_else(|_| "native-node-001".to_string());
@@ -182,26 +203,17 @@ impl State {
             std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
         );
 
-        // Signal server (env-configurable; hosted worker needs ?room=).
-        let signal_base = std::env::var("MPC_SIGNAL_SERVER")
-            .unwrap_or_else(|_| "wss://panda.qzz.io".to_string());
-        let signal_url = match std::env::var("MPC_ROOM") {
-            Ok(room) if !room.is_empty() && !signal_base.contains("room=") => {
-                if signal_base.contains('?') {
-                    format!("{signal_base}&room={room}")
-                } else if signal_base
-                    .splitn(2, "://")
-                    .nth(1)
-                    .unwrap_or(&signal_base)
-                    .contains('/')
-                {
-                    format!("{signal_base}?room={room}")
-                } else {
-                    format!("{signal_base}/?room={room}")
-                }
-            }
-            _ => signal_base,
-        };
+        // Signal server. Env vars remain supported for automation, but the
+        // desktop UI owns the room by default so users do not need shell setup.
+        let signal_input =
+            std::env::var("MPC_SIGNAL_SERVER").unwrap_or_else(|_| "wss://panda.qzz.io".to_string());
+        let (signal_base, room_from_url) = split_signal_room(&signal_input);
+        let signal_room = std::env::var("MPC_ROOM")
+            .ok()
+            .filter(|room| !room.trim().is_empty())
+            .or(room_from_url)
+            .unwrap_or_else(generate_room_id);
+        let signal_url = signal_url_with_room(&signal_base, &signal_room);
 
         let curve = std::env::var("MPC_CURVE").unwrap_or_else(|_| "secp256k1".to_string());
 
@@ -240,11 +252,14 @@ impl State {
             last_signature: String::new(),
             device_id,
             status_message: "Ready".to_string(),
+            pending_action: None,
             log_messages: Vec::new(),
             active_tab: Tab::Operations,
+            wallet_flow: WalletFlow::Join,
             new_wallet_name: String::new(),
             dkg_password: String::new(),
-            ws_url: signal_url,
+            ws_url: signal_base,
+            signal_room,
             sign_hex: String::new(),
             sign_chain: "ethereum".to_string(),
             join_session_id: String::new(),
@@ -283,6 +298,10 @@ impl State {
                 self.active_tab = tab;
                 Task::none()
             }
+            Message::WalletFlowSelected(flow) => {
+                self.wallet_flow = flow;
+                Task::none()
+            }
             Message::NewWalletNameChanged(v) => {
                 self.new_wallet_name = v;
                 Task::none()
@@ -292,8 +311,41 @@ impl State {
                 Task::none()
             }
             Message::WsUrlChanged(v) => {
-                self.ws_url = v;
+                let (base, room) = split_signal_room(&v);
+                self.ws_url = base;
+                if let Some(room) = room {
+                    self.signal_room = room;
+                }
                 Task::none()
+            }
+            Message::SignalRoomChanged(v) => {
+                self.signal_room = normalize_room_id(&v);
+                Task::none()
+            }
+            Message::GenerateSignalRoom => {
+                self.signal_room = generate_room_id();
+                Task::none()
+            }
+            Message::CopyDeviceId => {
+                self.status_message = "Copied device ID".to_string();
+                clipboard::write(self.device_id.clone())
+            }
+            Message::CopyRoomId => {
+                self.status_message = "Copied room ID".to_string();
+                clipboard::write(self.signal_room.clone())
+            }
+            Message::CopySignalUrl => {
+                let url = signal_url_with_room(&self.ws_url, &self.signal_room);
+                self.status_message = "Copied signal URL".to_string();
+                clipboard::write(url)
+            }
+            Message::CopyInviteId => {
+                let Some(invite_id) = self.invite_id().map(str::to_string) else {
+                    self.status_message = "No active invite yet".to_string();
+                    return Task::none();
+                };
+                self.status_message = "Copied invite ID".to_string();
+                clipboard::write(invite_id)
             }
             Message::SignHexChanged(v) => {
                 self.sign_hex = v;
@@ -323,27 +375,51 @@ impl State {
             }
 
             Message::ConnectWebsocket => {
+                if self.pending_action.is_some() {
+                    return Task::none();
+                }
+                if self.signal_room.trim().is_empty() {
+                    self.signal_room = generate_room_id();
+                }
                 let adapter = self.adapter.clone();
-                let url = self.ws_url.clone();
+                let url = signal_url_with_room(&self.ws_url, &self.signal_room);
+                self.status_message = "Connecting to signal server".to_string();
+                self.pending_action = Some(PendingAction::Connect);
                 action(async move { adapter.connect_websocket(url).await })
             }
             Message::CreateWallet => {
+                if self.pending_action.is_some() || self.dkg_active {
+                    return Task::none();
+                }
                 let adapter = self.adapter.clone();
                 let name = self.new_wallet_name.clone();
                 let pw = self.dkg_password.clone();
+                self.status_message =
+                    "Creating shared wallet. Waiting for other devices to join.".to_string();
+                self.pending_action = Some(PendingAction::CreateWallet);
                 action(async move {
                     adapter.set_dkg_password(pw);
                     adapter.create_wallet(name).await
                 })
             }
             Message::ImportWallet => {
+                if self.pending_action.is_some() {
+                    return Task::none();
+                }
                 let adapter = self.adapter.clone();
                 let pw = self.dkg_password.clone();
+                self.status_message = "Opening wallet import dialog".to_string();
+                self.pending_action = Some(PendingAction::ImportWallet);
                 action(async move { adapter.import_wallet(pw).await })
             }
             Message::ExportWallet => {
+                if self.pending_action.is_some() {
+                    return Task::none();
+                }
                 let adapter = self.adapter.clone();
                 let pw = self.dkg_password.clone();
+                self.status_message = "Opening wallet export dialog".to_string();
+                self.pending_action = Some(PendingAction::ExportWallet);
                 action(async move { adapter.export_wallet(pw).await })
             }
             Message::CreateSession => {
@@ -351,9 +427,14 @@ impl State {
                 action(async move { adapter.create_session().await })
             }
             Message::JoinSession => {
+                if self.pending_action.is_some() || self.dkg_active {
+                    return Task::none();
+                }
                 let adapter = self.adapter.clone();
                 let id = self.join_session_id.clone();
                 let pw = self.dkg_password.clone();
+                self.status_message = "Joining shared wallet ceremony".to_string();
+                self.pending_action = Some(PendingAction::JoinWallet);
                 action(async move {
                     adapter.set_dkg_password(pw);
                     adapter.join_session(id).await
@@ -380,9 +461,14 @@ impl State {
                 action(async move { adapter.abort_dkg().await })
             }
             Message::SignMessage => {
+                if self.pending_action.is_some() {
+                    return Task::none();
+                }
                 let adapter = self.adapter.clone();
                 let hex = self.sign_hex.clone();
                 let chain = self.sign_chain.clone();
+                self.status_message = "Requesting MPC signature".to_string();
+                self.pending_action = Some(PendingAction::Sign);
                 action(async move { adapter.request_signing(hex, chain, None).await.map(|_| ()) })
             }
             Message::ApproveSigning => {
@@ -412,9 +498,20 @@ impl State {
 
             Message::ActionDone(result) => {
                 if let Err(e) = result {
+                    self.pending_action = None;
                     tracing::warn!("native action failed: {e}");
                     self.push_log(format!("[ERROR] {e}"));
                     self.status_message = e;
+                } else if matches!(
+                    self.pending_action,
+                    Some(
+                        PendingAction::Connect
+                            | PendingAction::ImportWallet
+                            | PendingAction::ExportWallet
+                            | PendingAction::Sign
+                    )
+                ) {
+                    self.pending_action = None;
                 }
                 Task::none()
             }
@@ -427,6 +524,10 @@ impl State {
             UiEvent::ConnectionStatus { websocket, webrtc } => {
                 self.websocket_connected = websocket;
                 self.webrtc_connected = webrtc;
+                if websocket && self.pending_action == Some(PendingAction::Connect) {
+                    self.pending_action = None;
+                    self.status_message = "Signal connected".to_string();
+                }
             }
             UiEvent::MeshConnections(conns) => self.mesh_connections = conns,
             UiEvent::OperationMode(mode) => {
@@ -445,22 +546,45 @@ impl State {
             UiEvent::WalletsRich(wallets) => {
                 if !wallets.is_empty() {
                     self.has_keystore = true;
+                    if matches!(
+                        self.pending_action,
+                        Some(PendingAction::CreateWallet | PendingAction::JoinWallet)
+                    ) {
+                        self.pending_action = None;
+                        self.status_message = "Shared wallet ready".to_string();
+                    }
                 }
                 self.wallets = wallets;
             }
             UiEvent::ActiveWallet(i) => self.active_wallet_index = i,
             UiEvent::AvailableSessions(sessions) => self.available_sessions = sessions,
             UiEvent::ActiveSession(session) => self.active_session = session,
-            UiEvent::DkgStatus { active, round, progress } => {
+            UiEvent::DkgStatus {
+                active,
+                round,
+                progress,
+            } => {
                 self.dkg_active = active;
                 self.dkg_current_round = round;
                 self.dkg_progress = progress;
+                if active
+                    && matches!(
+                        self.pending_action,
+                        Some(PendingAction::CreateWallet | PendingAction::JoinWallet)
+                    )
+                {
+                    self.pending_action = None;
+                    self.status_message = "Wallet ceremony in progress".to_string();
+                }
             }
             UiEvent::DkgParticipants(_participants) => {
                 // TODO(iced): render a per-participant round table; for
                 // now the DKG progress bar (driven by DkgStatus) suffices.
             }
-            UiEvent::OfflineStatus { enabled, sd_card_detected } => {
+            UiEvent::OfflineStatus {
+                enabled,
+                sd_card_detected,
+            } => {
                 self.offline_enabled = enabled;
                 self.sd_card_detected = sd_card_detected;
             }
@@ -469,6 +593,9 @@ impl State {
             }
             UiEvent::SigningRequest(request) => match request {
                 Some(r) => {
+                    if self.pending_action == Some(PendingAction::Sign) {
+                        self.pending_action = None;
+                    }
                     self.has_signing_request = true;
                     self.signing_request_id = r.id;
                     self.signing_message_preview = if r.message_hex.len() > 120 {
@@ -500,7 +627,11 @@ impl State {
                 .to_string();
             }
             UiEvent::SigningComplete(sig) => self.last_signature = sig,
-            UiEvent::Message { log_line, status, is_error: _ } => {
+            UiEvent::Message {
+                log_line,
+                status,
+                is_error: _,
+            } => {
                 self.push_log(log_line);
                 self.status_message = status;
             }
@@ -516,59 +647,78 @@ impl State {
         }
     }
 
+    fn invite_id(&self) -> Option<&str> {
+        self.active_session
+            .as_ref()
+            .map(|session| session.session_id.as_str())
+            .or_else(|| {
+                self.available_sessions
+                    .iter()
+                    .find(|session| session.initiator == self.device_id)
+                    .map(|session| session.session_id.as_str())
+            })
+    }
+
     // -- View -----------------------------------------------------------
 
     fn view(&self) -> Element<'_, Message> {
-        column![
-            self.header(),
-            row![
-                container(self.left_panel())
-                    .width(Length::Fixed(400.0))
-                    .padding(8),
-                container(self.right_panel())
-                    .width(Length::Fill)
-                    .padding(8),
+        container(
+            column![
+                self.header(),
+                row![
+                    container(self.left_panel()).width(Length::Fixed(320.0)),
+                    container(self.right_panel()).width(Length::Fill),
+                ]
+                .spacing(18)
+                .height(Length::Fill),
             ]
-            .spacing(16)
-            .height(Length::Fill),
-        ]
+            .spacing(18),
+        )
+        .padding(20)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
     }
 
     fn header(&self) -> Element<'_, Message> {
+        let status = if self.websocket_connected {
+            "Signal connected"
+        } else {
+            header_status(&self.status_message)
+        };
         let title = column![
-            text("Starlab Desktop").size(24),
+            text("Starlab Desktop").size(22),
             text("MPC Wallet").size(12).color(muted()),
         ]
         .spacing(2);
 
-        container(
-            row![
-                title,
-                Space::new().width(Length::Fill),
-                column![
-                    text(format!("Device: {}", self.device_id)).size(13),
-                    text(&self.status_message).size(12).color(accent()),
-                ]
-                .spacing(2)
-                .align_x(iced::Alignment::End),
+        row![
+            title,
+            Space::new().width(Length::Fill),
+            column![
+                text(format!("Device {}", self.device_id)).size(13),
+                text(status).size(12).color(if self.websocket_connected {
+                    accent()
+                } else {
+                    muted()
+                }),
             ]
-            .align_y(iced::Alignment::Center)
-            .padding(16),
-        )
-        .width(Length::Fill)
+            .spacing(2)
+            .align_x(iced::Alignment::End),
+        ]
+        .align_y(iced::Alignment::Center)
         .into()
     }
 
     fn left_panel(&self) -> Element<'_, Message> {
         scrollable(
             column![
-                self.connection_status_view(),
-                self.wallet_selector_view(),
-                self.offline_mode_view(),
-                self.session_list_view(),
+                self.identity_nav_view(),
+                self.wallet_nav_view(),
+                self.session_nav_view(),
+                self.offline_nav_view(),
             ]
-            .spacing(16),
+            .spacing(12),
         )
         .into()
     }
@@ -577,9 +727,9 @@ impl State {
         let tabs = row![
             tab_button("Operations", Tab::Operations, self.active_tab),
             tab_button("Logs", Tab::Logs, self.active_tab),
-            tab_button("Settings", Tab::Settings, self.active_tab),
+            tab_button("Network", Tab::Settings, self.active_tab),
         ]
-        .spacing(8);
+        .spacing(6);
 
         let body: Element<'_, Message> = match self.active_tab {
             Tab::Operations => self.operations_tab(),
@@ -590,7 +740,7 @@ impl State {
         // The signing confirm "modal" is rendered inline at the top of
         // the right panel when a request is pending (Iced has no native
         // overlay stacking in this layout, so we surface it prominently).
-        let mut content = column![self.dkg_progress_view(), tabs].spacing(16);
+        let mut content = column![tabs, self.dkg_progress_view()].spacing(14);
         if self.has_signing_request {
             content = content.push(self.signing_modal_view());
         }
@@ -601,10 +751,38 @@ impl State {
 
     // ---- Components (formerly the .slint component files) ----
 
-    /// `components/connection_status.slint`
-    fn connection_status_view(&self) -> Element<'_, Message> {
+    fn identity_nav_view(&self) -> Element<'_, Message> {
         let ws = status_dot("WebSocket", self.websocket_connected);
         let rtc = status_dot("WebRTC", self.webrtc_connected);
+        let device = compact_row(
+            "Device ID",
+            &self.device_id,
+            button(text("Copy").size(12)).on_press(Message::CopyDeviceId),
+        );
+        let room_input = row![
+            column![
+                text("Room ID").size(12).color(muted()),
+                text_input("shared room id", &self.signal_room)
+                    .on_input(Message::SignalRoomChanged)
+                    .width(Length::Fill),
+            ]
+            .spacing(2)
+            .width(Length::Fill),
+            button(text("Copy").size(12)).on_press(Message::CopyRoomId),
+        ]
+        .spacing(8)
+        .align_y(iced::Alignment::Center);
+        let mut room_actions =
+            iced::widget::Row::new()
+                .spacing(8)
+                .push(button(text("New").size(12)).on_press(Message::GenerateSignalRoom))
+                .push(button(text("URL").size(12)).on_press(Message::CopySignalUrl));
+        if !self.websocket_connected {
+            room_actions = room_actions.push(
+                button(text("Connect").size(12))
+                    .on_press_maybe(self.pending_action.is_none().then_some(Message::ConnectWebsocket)),
+            );
+        }
         let mesh = text(format!(
             "Mesh peers: {} · mode: {}",
             self.mesh_connections.len(),
@@ -614,16 +792,27 @@ impl State {
         .color(muted());
 
         card(
-            "Connection",
-            column![ws, rtc, mesh].spacing(6).into(),
+            "Identity",
+            column![
+                column![ws, rtc, mesh].spacing(6),
+                section_divider(),
+                device,
+                room_input,
+                room_actions,
+            ]
+            .spacing(10)
+                .into(),
         )
     }
 
-    /// `components/wallet_selector.slint`
-    fn wallet_selector_view(&self) -> Element<'_, Message> {
+    fn wallet_nav_view(&self) -> Element<'_, Message> {
         let mut list = Column::new().spacing(6);
         if self.wallets.is_empty() {
-            list = list.push(text("No wallets — create or import one.").size(12).color(muted()));
+            list = list.push(
+                text("No wallets — create or import one.")
+                    .size(12)
+                    .color(muted()),
+            );
         } else {
             // BIP-44 account picker: [Account 0] [Account 1] … [＋]. Switching
             // is a pure State change — addresses below re-derive in this view.
@@ -638,11 +827,12 @@ impl State {
                 };
                 accounts = accounts.push(b);
             }
-            accounts = accounts
-                .push(button(text("＋").size(11)).on_press(Message::AddAccount));
-            list = list.push(scrollable(accounts).direction(
-                scrollable::Direction::Horizontal(scrollable::Scrollbar::default()),
-            ));
+            accounts = accounts.push(button(text("＋").size(11)).on_press(Message::AddAccount));
+            list = list.push(
+                scrollable(accounts).direction(scrollable::Direction::Horizontal(
+                    scrollable::Scrollbar::default(),
+                )),
+            );
 
             for (i, w) in self.wallets.iter().enumerate() {
                 let selected = i == self.active_wallet_index;
@@ -661,7 +851,9 @@ impl State {
                 // The BIP-44 path is shown faintly next to each address.
                 let mut col = Column::new().spacing(2).push(b);
                 for (curve, gk_hex) in &w.keys {
-                    let Ok(gk) = hex::decode(gk_hex) else { continue };
+                    let Ok(gk) = hex::decode(gk_hex) else {
+                        continue;
+                    };
                     let Ok(addrs) = starlab_core::accounts::account_addresses(
                         curve,
                         &gk,
@@ -686,29 +878,26 @@ impl State {
             }
         }
 
-        let create_row = row![
-            text_input("New wallet name", &self.new_wallet_name)
-                .on_input(Message::NewWalletNameChanged)
-                .width(Length::Fill),
-            button(text("Create")).on_press(Message::CreateWallet),
-        ]
-        .spacing(8);
-
         let io_row = row![
-            button(text("Import")).on_press(Message::ImportWallet),
-            button(text("Export"))
-                .on_press_maybe(self.has_keystore.then_some(Message::ExportWallet)),
+            button(text("Import").size(12))
+                .on_press_maybe(self.pending_action.is_none().then_some(Message::ImportWallet)),
+            button(text("Export").size(12))
+                .on_press_maybe(
+                    (self.has_keystore && self.pending_action.is_none())
+                        .then_some(Message::ExportWallet),
+                ),
         ]
         .spacing(8);
 
         card(
             "Wallets",
-            column![list, create_row, io_row].spacing(10).into(),
+            column![list, section_divider(), io_row]
+                .spacing(10)
+                .into(),
         )
     }
 
-    /// `components/offline_mode.slint`
-    fn offline_mode_view(&self) -> Element<'_, Message> {
+    fn offline_nav_view(&self) -> Element<'_, Message> {
         let toggle = button(text(if self.offline_enabled {
             "Disable offline mode"
         } else {
@@ -718,26 +907,26 @@ impl State {
 
         let detected = text(format!(
             "SD card: {}",
-            if self.sd_card_detected { "detected" } else { "not detected" }
+            if self.sd_card_detected {
+                "detected"
+            } else {
+                "not detected"
+            }
         ))
         .size(12)
         .color(muted());
 
         let sd_row = row![
-            button(text("Export →SD")).on_press(Message::ExportToSdCard),
-            button(text("Import ←SD")).on_press(Message::ImportFromSdCard),
-            button(text("Clear SD")).on_press(Message::ClearSdCard),
+            button(text("Export").size(12)).on_press(Message::ExportToSdCard),
+            button(text("Import").size(12)).on_press(Message::ImportFromSdCard),
+            button(text("Clear").size(12)).on_press(Message::ClearSdCard),
         ]
         .spacing(8);
 
-        card(
-            "Offline mode",
-            column![toggle, detected, sd_row].spacing(8).into(),
-        )
+        card("Offline", column![toggle, detected, sd_row].spacing(8).into())
     }
 
-    /// `components/session_list.slint`
-    fn session_list_view(&self) -> Element<'_, Message> {
+    fn session_nav_view(&self) -> Element<'_, Message> {
         let mut list = Column::new().spacing(6);
         if self.available_sessions.is_empty() {
             list = list.push(text("No sessions available.").size(12).color(muted()));
@@ -764,30 +953,27 @@ impl State {
         }
 
         let active = match &self.active_session {
-            Some(s) => text(format!("Active: {} ({})", s.session_id, session_status_str(&s.status)))
-                .size(12)
-                .color(accent()),
+            Some(s) => text(format!(
+                "Active: {} ({})",
+                s.session_id,
+                session_status_str(&s.status)
+            ))
+            .size(12)
+            .color(accent()),
             None => text("No active session.").size(12).color(muted()),
         };
 
-        let join_row = row![
-            text_input("Session id to join", &self.join_session_id)
-                .on_input(Message::JoinSessionIdChanged)
-                .width(Length::Fill),
-            button(text("Join")).on_press(Message::JoinSession),
-        ]
-        .spacing(8);
-
         let controls = row![
-            button(text("Create session")).on_press(Message::CreateSession),
-            button(text("Leave")).on_press(Message::LeaveSession),
-            button(text("Refresh")).on_press(Message::RefreshSessions),
+            button(text("Leave").size(12)).on_press(Message::LeaveSession),
+            button(text("Refresh").size(12)).on_press(Message::RefreshSessions),
         ]
         .spacing(8);
 
         card(
             "Sessions",
-            column![list, active, join_row, controls].spacing(10).into(),
+            column![list, active, section_divider(), controls]
+                .spacing(10)
+                .into(),
         )
     }
 
@@ -821,30 +1007,176 @@ impl State {
             .on_press_maybe(self.dkg_active.then_some(Message::AbortDkg));
 
         card(
-            "DKG progress",
-            column![header.size(14), session_line, bar, abort]
-                .spacing(8)
-                .into(),
+            "Distributed key generation",
+            row![
+                column![header.size(14), session_line, bar]
+                    .spacing(8)
+                    .width(Length::Fill),
+                abort,
+            ]
+            .spacing(16)
+            .align_y(iced::Alignment::Center)
+            .into(),
         )
     }
 
     fn operations_tab(&self) -> Element<'_, Message> {
-        let start = button(text("Start DKG")).on_press_maybe(
-            (self.active_session.is_some() && !self.dkg_active).then_some(Message::StartDkg),
-        );
-
-        card(
-            "Operations",
-            column![
-                text("DKG").size(14),
-                start,
-                Space::new().height(8),
-                text("Signing").size(14),
-                text("Use the Settings tab to request a signature.")
+        let connected = self.websocket_connected;
+        let wallet_ready = !self.wallets.is_empty() || self.has_keystore;
+        let can_sign = self.has_keystore && self.signing_state == "idle";
+        let is_creating = self.pending_action == Some(PendingAction::CreateWallet);
+        let is_joining = self.pending_action == Some(PendingAction::JoinWallet);
+        let busy = self.pending_action.is_some() || self.dkg_active;
+        let can_create_wallet = connected && !busy;
+        let can_join_wallet = connected && !busy && !self.join_session_id.trim().is_empty();
+        let invite_id = self.invite_id();
+        let invite_row: Element<'_, Message> = match invite_id {
+            Some(id) => row![
+                text(format!("Invite ID: {}", short_addr(id)))
+                    .size(12)
+                    .color(accent())
+                    .width(Length::Fill),
+                button(text("Copy invite")).on_press(Message::CopyInviteId),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center)
+            .into(),
+            None => Space::new().into(),
+        };
+        let connect_action = if connected {
+            None
+        } else {
+            Some(
+                button(text(if self.pending_action == Some(PendingAction::Connect) {
+                    "Connecting..."
+                } else {
+                    "Connect"
+                }))
+                .on_press_maybe(
+                    (self.pending_action != Some(PendingAction::Connect))
+                        .then_some(Message::ConnectWebsocket),
+                )
+                .into(),
+            )
+        };
+        let mut create_tab =
+            button(text("Create new shared wallet")).on_press(Message::WalletFlowSelected(WalletFlow::Create));
+        let mut join_tab =
+            button(text("Join existing shared wallet")).on_press(Message::WalletFlowSelected(WalletFlow::Join));
+        if self.wallet_flow == WalletFlow::Create {
+            create_tab = create_tab.style(button::primary);
+            join_tab = join_tab.style(button::secondary);
+        } else {
+            create_tab = create_tab.style(button::secondary);
+            join_tab = join_tab.style(button::primary);
+        }
+        let wallet_path: Element<'_, Message> = match self.wallet_flow {
+            WalletFlow::Create => column![
+                text("Create a new shared wallet").size(15),
+                text(if invite_id.is_some() || self.dkg_active {
+                    "Share the invite ID with the other devices. Keep this app open while they join."
+                } else {
+                    "Use this on the first device. This creates the invite that other devices will join."
+                })
+                .size(12)
+                .color(muted()),
+                invite_row,
+                row![
+                    text_input("Wallet name", &self.new_wallet_name)
+                        .on_input(Message::NewWalletNameChanged)
+                        .width(Length::Fill),
+                    button(text(if is_creating {
+                        "Creating..."
+                    } else {
+                        "Create shared wallet"
+                    }))
+                    .on_press_maybe(can_create_wallet.then_some(Message::CreateWallet)),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
+            ]
+            .spacing(10)
+            .into(),
+            WalletFlow::Join => column![
+                text("Join a shared wallet").size(15),
+                text("Use this on the other devices. Paste the invite ID from the creator.")
                     .size(12)
                     .color(muted()),
+                row![
+                    text_input("Invite ID", &self.join_session_id)
+                        .on_input(Message::JoinSessionIdChanged)
+                        .width(Length::Fill),
+                    button(text(if is_joining {
+                        "Joining..."
+                    } else {
+                        "Join shared wallet"
+                    }))
+                    .on_press_maybe(can_join_wallet.then_some(Message::JoinSession)),
+                ]
+                .spacing(10)
+                .align_y(iced::Alignment::Center),
             ]
-            .spacing(8)
+            .spacing(10)
+            .into(),
+        };
+
+        card(
+            "Start",
+            column![
+                flow_step(
+                    "1",
+                    "Connect devices",
+                    if connected {
+                        "Connected. Devices that use the same room ID can find each other."
+                    } else {
+                        "Connect before creating or joining a shared wallet."
+                    },
+                    if connected { "Ready" } else { "Required" },
+                    connect_action,
+                ),
+                section_divider(),
+                row![
+                    create_tab,
+                    join_tab,
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
+                wallet_path,
+                section_divider(),
+                flow_step(
+                    "2",
+                    "Wait for the ceremony",
+                    if self.dkg_active {
+                        "The wallet ceremony is running. Keep all devices online until it completes."
+                    } else if wallet_ready {
+                        "Wallet material is available on this device."
+                    } else {
+                        "After creating or joining, progress appears in the DKG panel above."
+                    },
+                    if self.dkg_active {
+                        "Running"
+                    } else if wallet_ready {
+                        "Ready"
+                    } else {
+                        "Pending"
+                    },
+                    None,
+                ),
+                section_divider(),
+                flow_step(
+                    "3",
+                    "Sign message",
+                    if can_sign {
+                        "Enter a message and request an MPC signature from this device."
+                    } else {
+                        "Signing becomes available after this device has a wallet share."
+                    },
+                    if can_sign { "Ready" } else { "Blocked" },
+                    can_sign
+                        .then(|| button(text("Request signing")).on_press(Message::SignMessage).into()),
+                ),
+            ]
+            .spacing(12)
             .into(),
         )
     }
@@ -862,17 +1194,33 @@ impl State {
     }
 
     fn settings_tab(&self) -> Element<'_, Message> {
+        let effective_signal_url = signal_url_with_room(&self.ws_url, &self.signal_room);
         let network = card(
             "Network",
             column![
                 text("Signal server").size(12).color(muted()),
+                text_input("wss://panda.qzz.io", &self.ws_url)
+                    .on_input(Message::WsUrlChanged)
+                    .width(Length::Fill),
+                text("Room ID").size(12).color(muted()),
                 row![
-                    text_input("wss://…", &self.ws_url)
-                        .on_input(Message::WsUrlChanged)
+                    text_input("room", &self.signal_room)
+                        .on_input(Message::SignalRoomChanged)
                         .width(Length::Fill),
+                    button(text("New room")).on_press(Message::GenerateSignalRoom),
+                    button(text("Copy")).on_press(Message::CopyRoomId),
                     button(text("Connect")).on_press(Message::ConnectWebsocket),
                 ]
                 .spacing(8),
+                row![
+                    text(format!("URL: {effective_signal_url}"))
+                        .size(11)
+                        .color(faint())
+                        .width(Length::Fill),
+                    button(text("Copy URL")).on_press(Message::CopySignalUrl),
+                ]
+                .spacing(8)
+                .align_y(iced::Alignment::Center),
             ]
             .spacing(8)
             .into(),
@@ -899,10 +1247,13 @@ impl State {
         let last_sig: Element<'_, Message> = if self.last_signature.is_empty() {
             Space::new().into()
         } else {
-            text(format!("Last signature: {}", short_addr(&self.last_signature)))
-                .size(11)
-                .color(muted())
-                .into()
+            text(format!(
+                "Last signature: {}",
+                short_addr(&self.last_signature)
+            ))
+            .size(11)
+            .color(muted())
+            .into()
         };
         let signing = card(
             "Sign message (MPC)",
@@ -931,16 +1282,24 @@ impl State {
         };
 
         let awaiting = self.signing_state == "awaiting_approval";
-        let approve_label = if awaiting { "Approve & Sign" } else { "Signing…" };
+        let approve_label = if awaiting {
+            "Approve & Sign"
+        } else {
+            "Signing…"
+        };
 
         card(
             "Confirm signing request",
             column![
                 label,
-                text(format!("Chain: {}", self.signing_chain)).size(12).color(muted()),
+                text(format!("Chain: {}", self.signing_chain))
+                    .size(12)
+                    .color(muted()),
                 text("Message:").size(12).color(muted()),
                 text(&self.signing_message_preview).size(11),
-                text(format!("Phase: {}", self.signing_state)).size(11).color(faint()),
+                text(format!("Phase: {}", self.signing_state))
+                    .size(11)
+                    .color(faint()),
                 row![
                     button(text("Reject"))
                         .style(button::danger)
@@ -955,6 +1314,61 @@ impl State {
             .spacing(10)
             .into(),
         )
+    }
+}
+
+fn generate_room_id() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
+fn normalize_room_id(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .collect()
+}
+
+fn split_signal_room(input: &str) -> (String, Option<String>) {
+    let url = input.trim();
+    let Some(room_key) = url.find("room=") else {
+        return (url.to_string(), None);
+    };
+
+    let value_start = room_key + "room=".len();
+    let value_end = url[value_start..]
+        .find('&')
+        .map(|offset| value_start + offset)
+        .unwrap_or(url.len());
+    let room = url[value_start..value_end].trim().to_string();
+
+    let mut base = format!("{}{}", &url[..room_key], &url[value_end..]);
+    while base.contains("?&") {
+        base = base.replace("?&", "?");
+    }
+    while base.ends_with('?') || base.ends_with('&') {
+        base.pop();
+    }
+
+    (base, (!room.is_empty()).then_some(room))
+}
+
+fn signal_url_with_room(base: &str, room: &str) -> String {
+    let base = base.trim();
+    let room = room.trim();
+    if room.is_empty() || base.contains("room=") {
+        return base.to_string();
+    }
+
+    if base.contains('?') {
+        format!("{base}&room={room}")
+    } else if base
+        .split_once("://")
+        .map(|(_, rest)| rest.contains('/'))
+        .unwrap_or_else(|| base.contains('/'))
+    {
+        format!("{base}?room={room}")
+    } else {
+        format!("{base}/?room={room}")
     }
 }
 
@@ -999,13 +1413,114 @@ where
 // ---------------------------------------------------------------------------
 
 fn card<'a>(title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
-    container(
-        column![text(title).size(16), body].spacing(10),
-    )
-    .padding(16)
-    .width(Length::Fill)
-    .style(container::rounded_box)
+    container(column![text(title).size(15), body].spacing(12))
+        .padding(14)
+        .width(Length::Fill)
+        .style(panel_style)
+        .into()
+}
+
+fn section_divider<'a>() -> Element<'a, Message> {
+    container(Space::new().height(1))
+        .height(1)
+        .width(Length::Fill)
+        .style(|_theme| container::Style {
+            background: Some(Background::Color(Color::from_rgb8(72, 78, 88))),
+            ..container::Style::default()
+        })
+        .into()
+}
+
+fn compact_row<'a>(
+    label: &'a str,
+    value: &'a str,
+    action: iced::widget::Button<'a, Message>,
+) -> Element<'a, Message> {
+    row![
+        column![
+            text(label).size(12).color(muted()),
+            text(value).size(12).color(faint()),
+        ]
+        .spacing(2)
+        .width(Length::Fill),
+        action,
+    ]
+    .spacing(8)
+    .align_y(iced::Alignment::Center)
     .into()
+}
+
+fn flow_step<'a>(
+    number: &'a str,
+    title: &'a str,
+    detail: &'a str,
+    status: &'a str,
+    action: Option<Element<'a, Message>>,
+) -> Element<'a, Message> {
+    let mut content = row![
+        container(text(number).size(12))
+            .width(Length::Fixed(28.0))
+            .height(Length::Fixed(28.0))
+            .center_x(Length::Fixed(28.0))
+            .center_y(Length::Fixed(28.0))
+            .style(step_badge_style),
+        column![
+            row![
+                text(title).size(15),
+                Space::new().width(Length::Fill),
+                text(status).size(12).color(status_color(status)),
+            ]
+            .align_y(iced::Alignment::Center),
+            text(detail).size(12).color(muted()),
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+    ];
+
+    if let Some(action) = action {
+        content = content.push(action);
+    }
+
+    content
+        .spacing(14)
+        .align_y(iced::Alignment::Center)
+        .into()
+}
+
+fn header_status(status: &str) -> &str {
+    if status.starts_with("Connecting") {
+        "Connecting"
+    } else if status.is_empty() || status == "Ready" {
+        "Ready"
+    } else {
+        status
+    }
+}
+
+fn step_badge_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb8(67, 74, 86))),
+        text_color: Some(Color::from_rgb8(238, 241, 247)),
+        border: Border {
+            width: 1.0,
+            radius: 14.0.into(),
+            color: Color::from_rgb8(86, 96, 112),
+        },
+        ..container::Style::default()
+    }
+}
+
+fn panel_style(_theme: &Theme) -> container::Style {
+    container::Style {
+        background: Some(Background::Color(Color::from_rgb8(45, 49, 56))),
+        text_color: Some(Color::from_rgb8(226, 230, 236)),
+        border: Border {
+            width: 1.0,
+            radius: 6.0.into(),
+            color: Color::from_rgb8(65, 72, 82),
+        },
+        ..container::Style::default()
+    }
 }
 
 fn tab_button(label: &str, tab: Tab, active: Tab) -> Element<'_, Message> {
@@ -1025,7 +1540,11 @@ fn status_dot(label: &str, connected: bool) -> Element<'_, Message> {
         text(dot).color(color),
         text(format!(
             "{label}: {}",
-            if connected { "connected" } else { "disconnected" }
+            if connected {
+                "connected"
+            } else {
+                "disconnected"
+            }
         ))
         .size(13),
     ]
@@ -1061,4 +1580,13 @@ fn muted() -> Color {
 
 fn faint() -> Color {
     Color::from_rgb(0.80, 0.84, 0.88) // #CBD5E1
+}
+
+fn status_color(status: &str) -> Color {
+    match status {
+        "Ready" | "Running" => accent(),
+        "Required" => Color::from_rgb8(236, 190, 104),
+        "Blocked" => muted(),
+        _ => faint(),
+    }
 }
