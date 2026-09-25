@@ -152,6 +152,7 @@ pub struct State {
 
     // DKG state
     dkg_active: bool,
+    creating_wallet: bool,
     dkg_current_round: u8,
     dkg_progress: f32,
 
@@ -239,6 +240,7 @@ impl State {
             available_sessions: Vec::new(),
             active_session: None,
             dkg_active: false,
+            creating_wallet: false,
             dkg_current_round: 0,
             dkg_progress: 0.0,
             offline_enabled: false,
@@ -390,7 +392,7 @@ impl State {
                 action(async move { adapter.connect_websocket(url).await })
             }
             Message::CreateWallet => {
-                if self.pending_action.is_some() || self.dkg_active {
+                if self.wallet_busy() {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
@@ -429,7 +431,7 @@ impl State {
                 action(async move { adapter.create_session().await })
             }
             Message::JoinSession => {
-                if self.pending_action.is_some() || self.dkg_active {
+                if self.wallet_busy() {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
@@ -584,6 +586,7 @@ impl State {
                     self.status_message = "Wallet ceremony in progress".to_string();
                 }
             }
+            UiEvent::CreatingWallet(creating) => self.creating_wallet = creating,
             UiEvent::DkgParticipants(_participants) => {
                 // TODO(iced): render a per-participant round table; for
                 // now the DKG progress bar (driven by DkgStatus) suffices.
@@ -652,6 +655,14 @@ impl State {
         if overflow > 0 {
             self.log_messages.drain(0..overflow);
         }
+    }
+
+    /// A wallet action is queued, or the runner still has a ceremony open.
+    /// `pending_action` clears as soon as Create is sent, so without
+    /// `creating_wallet` the button re-enables while waiting for peers and a
+    /// second click would announce a second session.
+    fn wallet_busy(&self) -> bool {
+        self.pending_action.is_some() || self.dkg_active || self.creating_wallet
     }
 
     fn invite_id(&self) -> Option<&str> {
@@ -1011,7 +1022,9 @@ impl State {
 
         let abort = button(text("Abort DKG"))
             .style(button::danger)
-            .on_press_maybe(self.dkg_active.then_some(Message::AbortDkg));
+            .on_press_maybe(
+                (self.dkg_active || self.creating_wallet).then_some(Message::AbortDkg),
+            );
 
         card(
             "Distributed key generation",
@@ -1033,7 +1046,7 @@ impl State {
         let can_sign = self.has_keystore && self.signing_state == "idle";
         let is_creating = self.pending_action == Some(PendingAction::CreateWallet);
         let is_joining = self.pending_action == Some(PendingAction::JoinWallet);
-        let busy = self.pending_action.is_some() || self.dkg_active;
+        let busy = self.wallet_busy();
         let can_create_wallet = connected && !busy;
         let can_join_wallet = connected && !busy && !self.join_session_id.trim().is_empty();
         let invite_id = self.invite_id();
