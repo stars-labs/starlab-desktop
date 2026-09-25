@@ -256,6 +256,9 @@ impl CoreAdapter {
                 .collect::<Vec<_>>();
             // Multi-chain wallet list straight down the channel (not a trait method).
             let _ = ui_tx_rich.send(UiEvent::WalletsRich(rich_wallets(model)));
+            let _ = ui_tx_rich.send(UiEvent::CreatingWallet(
+                model.wallet_state.creating_wallet.is_some(),
+            ));
             let connected = model.network_state.connected;
             // Real DKG progress from the model (not a hardcoded 50%): active
             // tracks `dkg_in_progress` (flips false on finalize/abort, so the
@@ -726,11 +729,60 @@ impl CoreAdapter {
             .map_err(|e| e.to_string())
     }
 
-    /// Abort DKG process
+    /// Abort the wallet ceremony. The runner owns the DKG state, so cancel
+    /// there: it clears `creating_wallet` and `active_session`, which is what
+    /// unlocks Create/Join again (including after a failed ceremony).
     pub async fn abort_dkg(&self) -> Result<(), String> {
-        self.dkg_manager
-            .abort_dkg()
-            .await
+        self.runner_tx
+            .send(Message::CancelDKG)
             .map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::watch;
+
+    async fn wait_for(rx: &mut watch::Receiver<bool>, want: bool) {
+        tokio::time::timeout(Duration::from_secs(5), rx.wait_for(|v| *v == want))
+            .await
+            .unwrap_or_else(|_| panic!("creating_wallet never became {want}"))
+            .expect("runner dropped");
+    }
+
+    /// The desktop gates Create/Join on the runner's `creating_wallet`, so the
+    /// runner must set it on create and clear it on CancelDKG (Abort button).
+    #[tokio::test]
+    async fn runner_creating_wallet_set_on_create_and_cleared_on_cancel() {
+        let keystore = std::env::temp_dir().join(format!("starlab-test-{}", uuid::Uuid::new_v4()));
+        let (flag_tx, mut flag_rx) = watch::channel(false);
+        let (tx, _control) = spawn_secp256k1_runner(
+            "test-device".to_string(),
+            keystore.to_string_lossy().into_owned(),
+            "ws://127.0.0.1:9".to_string(),
+            move |model: &Model, _| {
+                let _ = flag_tx.send(model.wallet_state.creating_wallet.is_some());
+            },
+        );
+
+        tx.send(Message::HeadlessCreateWallet {
+            config: WalletConfig {
+                name: "w".to_string(),
+                total_participants: DEFAULT_TOTAL,
+                threshold: DEFAULT_THRESHOLD,
+                mode: WalletMode::Online,
+            },
+            password: "pw".to_string(),
+            label: "w".to_string(),
+        })
+        .unwrap();
+        wait_for(&mut flag_rx, true).await;
+
+        tx.send(Message::CancelDKG).unwrap();
+        wait_for(&mut flag_rx, false).await;
+
+        let _ = std::fs::remove_dir_all(keystore);
     }
 }
