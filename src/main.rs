@@ -313,13 +313,10 @@ impl State {
             Message::WsUrlChanged(v) => {
                 let (base, room) = split_signal_room(&v);
                 self.ws_url = base;
-                // BUG 3: only overwrite signal_room when the URL actually
-                // contains a non-empty room= param, so that typing in the
-                // URL field doesn't silently destroy a previously-set room.
-                if let Some(r) = room {
-                    if !r.is_empty() {
-                        self.signal_room = r;
-                    }
+                // split_signal_room returns None for a missing or empty room=,
+                // so a URL still being typed keeps the previously-set room.
+                if let Some(room) = room {
+                    self.signal_room = room;
                 }
                 Task::none()
             }
@@ -514,13 +511,9 @@ impl State {
                             | PendingAction::ImportWallet
                             | PendingAction::ExportWallet
                             | PendingAction::Sign
-                            // BUG 5: CreateWallet and JoinWallet are fire-and-
-                            // forget sends: the async action completes as soon
-                            // as the message is queued to the core. If the send
-                            // succeeds (Ok(())) we must clear pending_action here
-                            // because no subsequent UiEvent::WalletsRich fires on
-                            // a simple send error path — leaving pending_action
-                            // set would permanently lock the UI spinner.
+                            // Create/Join only queue a message to the runner; a
+                            // ceremony that fails later emits no event, so waiting
+                            // for DkgStatus/WalletsRich could lock the UI forever.
                             | PendingAction::CreateWallet
                             | PendingAction::JoinWallet
                     )
@@ -1223,8 +1216,7 @@ impl State {
                         .width(Length::Fill),
                     button(text("New room")).on_press(Message::GenerateSignalRoom),
                     button(text("Copy")).on_press(Message::CopyRoomId),
-                    // BUG 4: disable when already connected (mirrors the
-                    // home-tab Connect button that gates on websocket_connected).
+                    // Reconnecting mid-ceremony would drop the DKG session.
                     button(text("Connect")).on_press_maybe(
                         (!self.websocket_connected).then_some(Message::ConnectWebsocket),
                     ),
@@ -1348,8 +1340,7 @@ fn normalize_room_id(input: &str) -> String {
 
 fn split_signal_room(input: &str) -> (String, Option<String>) {
     let url = input.trim();
-    // BUG 1: only match `room=` when preceded by `?` or `&` to avoid
-    // false-matching substrings like `chatroom=` or `showroom=`.
+    // Match `room=` only as a whole query key, not inside `chatroom=`.
     let room_key = url
         .match_indices("room=")
         .find(|&(pos, _)| pos == 0 || matches!(url.as_bytes().get(pos - 1), Some(b'?' | b'&')))
@@ -1369,7 +1360,7 @@ fn split_signal_room(input: &str) -> (String, Option<String>) {
     while base.contains("?&") {
         base = base.replace("?&", "?");
     }
-    // BUG 2: normalize `&&` that can appear when removing a middle param.
+    // Removing a middle param leaves `&&` behind.
     while base.contains("&&") {
         base = base.replace("&&", "&");
     }
@@ -1616,5 +1607,58 @@ fn status_color(status: &str) -> Color {
         "Required" => Color::from_rgb8(236, 190, 104),
         "Blocked" => muted(),
         _ => faint(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_signal_room;
+
+    #[test]
+    fn extracts_room_from_query() {
+        assert_eq!(
+            split_signal_room("wss://sig.example/ws?room=abc"),
+            ("wss://sig.example/ws".into(), Some("abc".into()))
+        );
+    }
+
+    #[test]
+    fn ignores_room_suffix_in_other_keys() {
+        assert_eq!(
+            split_signal_room("wss://sig.example/ws?chatroom=x"),
+            ("wss://sig.example/ws?chatroom=x".into(), None)
+        );
+    }
+
+    #[test]
+    fn finds_room_after_lookalike_key() {
+        assert_eq!(
+            split_signal_room("wss://sig.example/ws?chatroom=x&room=abc"),
+            ("wss://sig.example/ws?chatroom=x".into(), Some("abc".into()))
+        );
+    }
+
+    #[test]
+    fn strips_middle_room_param_cleanly() {
+        assert_eq!(
+            split_signal_room("wss://sig.example/ws?a=1&room=abc&b=2"),
+            ("wss://sig.example/ws?a=1&b=2".into(), Some("abc".into()))
+        );
+    }
+
+    #[test]
+    fn empty_room_value_is_none() {
+        assert_eq!(
+            split_signal_room("wss://sig.example/ws?room="),
+            ("wss://sig.example/ws".into(), None)
+        );
+    }
+
+    #[test]
+    fn url_without_query_is_unchanged() {
+        assert_eq!(
+            split_signal_room("  wss://sig.example/ws  "),
+            ("wss://sig.example/ws".into(), None)
+        );
     }
 }
