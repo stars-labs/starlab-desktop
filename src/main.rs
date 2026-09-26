@@ -666,15 +666,11 @@ impl State {
     }
 
     fn invite_id(&self) -> Option<&str> {
-        self.active_session
-            .as_ref()
-            .map(|session| session.session_id.as_str())
-            .or_else(|| {
-                self.available_sessions
-                    .iter()
-                    .find(|session| session.initiator == self.device_id)
-                    .map(|session| session.session_id.as_str())
-            })
+        own_invite_id(
+            &self.device_id,
+            self.active_session.as_ref(),
+            &self.available_sessions,
+        )
     }
 
     // -- View -----------------------------------------------------------
@@ -1351,6 +1347,20 @@ fn normalize_room_id(input: &str) -> String {
         .collect()
 }
 
+/// The invite this device can hand out: a session it proposed. A session we
+/// merely joined is someone else's invite, so it is never shown as ours.
+fn own_invite_id<'a>(
+    device_id: &str,
+    active: Option<&'a SessionInfo>,
+    available: &'a [SessionInfo],
+) -> Option<&'a str> {
+    active
+        .into_iter()
+        .chain(available)
+        .find(|session| session.initiator == device_id)
+        .map(|session| session.session_id.as_str())
+}
+
 fn split_signal_room(input: &str) -> (String, Option<String>) {
     let url = input.trim();
     // Match `room=` only as a whole query key, not inside `chatroom=`.
@@ -1625,7 +1635,36 @@ fn status_color(status: &str) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::split_signal_room;
+    use super::{SessionInfo, SessionStatus, own_invite_id, split_signal_room};
+
+    fn session(id: &str, initiator: &str) -> SessionInfo {
+        SessionInfo {
+            session_id: id.to_string(),
+            initiator: initiator.to_string(),
+            participants: Vec::new(),
+            threshold: (2, 3),
+            status: SessionStatus::Waiting,
+            created_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn joined_session_is_not_shown_as_own_invite() {
+        let joined = session("s1", "peer");
+        assert_eq!(own_invite_id("me", Some(&joined), &[joined.clone()]), None);
+    }
+
+    #[test]
+    fn created_session_is_shown_as_own_invite() {
+        let created = session("s1", "me");
+        assert_eq!(own_invite_id("me", Some(&created), &[]), Some("s1"));
+    }
+
+    #[test]
+    fn own_announced_session_is_found_among_available() {
+        let sessions = [session("s0", "peer"), session("s1", "me")];
+        assert_eq!(own_invite_id("me", None, &sessions), Some("s1"));
+    }
 
     #[test]
     fn extracts_room_from_query() {
