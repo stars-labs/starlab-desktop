@@ -54,9 +54,9 @@ pub enum UiEvent {
     AvailableSessions(Vec<SessionInfo>),
     ActiveSession(Option<SessionInfo>),
     DkgStatus { active: bool, round: u8, progress: f32 },
-    /// The runner has a wallet-creation ceremony open (invite announced,
-    /// possibly still waiting for participants). Cleared on finalize/cancel.
-    CreatingWallet(bool),
+    /// The runner has a wallet ceremony open — as creator (invite announced)
+    /// or joiner (joined, waiting for DKG). Cleared on finalize/cancel.
+    CeremonyOpen(bool),
     DkgParticipants(Vec<ParticipantInfo>),
     OfflineStatus { enabled: bool, sd_card_detected: bool },
     SdOperations(Vec<SDCardOperation>),

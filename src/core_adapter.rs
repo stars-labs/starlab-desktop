@@ -256,9 +256,7 @@ impl CoreAdapter {
                 .collect::<Vec<_>>();
             // Multi-chain wallet list straight down the channel (not a trait method).
             let _ = ui_tx_rich.send(UiEvent::WalletsRich(rich_wallets(model)));
-            let _ = ui_tx_rich.send(UiEvent::CreatingWallet(
-                model.wallet_state.creating_wallet.is_some(),
-            ));
+            let _ = ui_tx_rich.send(UiEvent::CeremonyOpen(ceremony_open(model)));
             let connected = model.network_state.connected;
             // Real DKG progress from the model (not a hardcoded 50%): active
             // tracks `dkg_in_progress` (flips false on finalize/abort, so the
@@ -730,7 +728,7 @@ impl CoreAdapter {
     }
 
     /// Abort the wallet ceremony. The runner owns the DKG state, so cancel
-    /// there: it clears `creating_wallet` and `active_session`, which is what
+    /// there: it clears `creating_wallet` / `joining_session`, which is what
     /// unlocks Create/Join again (including after a failed ceremony).
     pub async fn abort_dkg(&self) -> Result<(), String> {
         self.runner_tx
@@ -739,34 +737,44 @@ impl CoreAdapter {
     }
 }
 
+/// A wallet ceremony is open on this device, as creator or joiner.
+fn ceremony_open(model: &Model) -> bool {
+    model.wallet_state.creating_wallet.is_some() || model.wallet_state.joining_session.is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use starlab_client::protocal::signal::{SessionInfo as SignalSession, SessionType};
     use std::time::Duration;
     use tokio::sync::watch;
 
-    async fn wait_for(rx: &mut watch::Receiver<bool>, want: bool) {
-        tokio::time::timeout(Duration::from_secs(5), rx.wait_for(|v| *v == want))
-            .await
-            .unwrap_or_else(|_| panic!("creating_wallet never became {want}"))
-            .expect("runner dropped");
-    }
-
-    /// The desktop gates Create/Join on the runner's `creating_wallet`, so the
-    /// runner must set it on create and clear it on CancelDKG (Abort button).
-    #[tokio::test]
-    async fn runner_creating_wallet_set_on_create_and_cleared_on_cancel() {
+    /// Spawn a real runner (unreachable signal server) that reports
+    /// `ceremony_open` after every update.
+    fn spawn_runner() -> (UnboundedSender<Message>, watch::Receiver<bool>, std::path::PathBuf) {
         let keystore = std::env::temp_dir().join(format!("starlab-test-{}", uuid::Uuid::new_v4()));
-        let (flag_tx, mut flag_rx) = watch::channel(false);
+        let (flag_tx, flag_rx) = watch::channel(false);
         let (tx, _control) = spawn_secp256k1_runner(
             "test-device".to_string(),
             keystore.to_string_lossy().into_owned(),
             "ws://127.0.0.1:9".to_string(),
             move |model: &Model, _| {
-                let _ = flag_tx.send(model.wallet_state.creating_wallet.is_some());
+                let _ = flag_tx.send(ceremony_open(model));
             },
         );
+        (tx, flag_rx, keystore)
+    }
 
+    async fn wait_for(rx: &mut watch::Receiver<bool>, want: bool) {
+        tokio::time::timeout(Duration::from_secs(5), rx.wait_for(|v| *v == want))
+            .await
+            .unwrap_or_else(|_| panic!("ceremony_open never became {want}"))
+            .expect("runner dropped");
+    }
+
+    #[tokio::test]
+    async fn creator_ceremony_opens_on_create_and_closes_on_cancel() {
+        let (tx, mut open, keystore) = spawn_runner();
         tx.send(Message::HeadlessCreateWallet {
             config: WalletConfig {
                 name: "w".to_string(),
@@ -778,11 +786,40 @@ mod tests {
             label: "w".to_string(),
         })
         .unwrap();
-        wait_for(&mut flag_rx, true).await;
+        wait_for(&mut open, true).await;
 
         tx.send(Message::CancelDKG).unwrap();
-        wait_for(&mut flag_rx, false).await;
+        wait_for(&mut open, false).await;
+        let _ = std::fs::remove_dir_all(keystore);
+    }
 
+    #[tokio::test]
+    async fn joiner_ceremony_opens_on_join_and_closes_on_cancel() {
+        let (tx, mut open, keystore) = spawn_runner();
+        tx.send(Message::SessionDiscovered {
+            session: SignalSession {
+                session_id: "s1".to_string(),
+                proposer_id: "peer".to_string(),
+                total: 2,
+                threshold: 2,
+                participants: vec!["peer".to_string()],
+                session_type: SessionType::DKG,
+                curve_type: "secp256k1".to_string(),
+                coordination_type: "online".to_string(),
+                signing_message_hex: None,
+            },
+        })
+        .unwrap();
+        tx.send(Message::HeadlessJoinSession {
+            session_id: "s1".to_string(),
+            password: "pw".to_string(),
+            label: String::new(),
+        })
+        .unwrap();
+        wait_for(&mut open, true).await;
+
+        tx.send(Message::CancelDKG).unwrap();
+        wait_for(&mut open, false).await;
         let _ = std::fs::remove_dir_all(keystore);
     }
 }
