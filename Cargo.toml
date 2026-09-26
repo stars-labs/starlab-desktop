@@ -23,8 +23,8 @@ starlab-client = { git = "https://github.com/stars-labs/starlab-mpc", branch = "
 # by the view layer so switching accounts is a pure local re-derivation.
 starlab-core = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }
 
-hex = "0.4"
-uuid = { version = "1.11.0", features = ["v4"] }
+hex = "0.4.3"
+uuid = { version = "1.26.1", features = ["v4"] }
 
 # Directly construct the shared headless runner so the desktop shell can update
 # the signal-server URL at runtime before reconnecting.
@@ -33,26 +33,26 @@ frost-secp256k1 = { version = "3.0.0", features = ["serde", "serialization"] }
 
 # Async runtime for the core managers + the mpsc UICallback bridge +
 # tokio::task::spawn_blocking for rfd dialogs.
-tokio = { version = "1.42.0", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 
 # serde_json::json! for UI-event payloads.
-serde_json = "1.0.143"
+serde_json = "1.0.151"
 
 # Error handling in the CoreAdapter wrappers.
-anyhow = "1.0.99"
+anyhow = "1.0.104"
 
 # Logging.
-tracing = "0.1.41"
-tracing-subscriber = "0.3.19"
+tracing = "0.1.44"
+tracing-subscriber = "0.3.23"
 
 # Native file-open / save dialogs for keystore import/export and the SD-card
 # folder picker.
-rfd = "0.15"
+rfd = "0.17"
 
 # Required by starlab-client::core::UICallback (`#[async_trait]`) and for timestamp
 # formatting in log-event payloads pushed to the UI.
-async-trait = "0.1.83"
-chrono = { version = "0.4.39", features = ["serde"] }
+async-trait = "0.1.92"
+chrono = { version = "0.4.45", features = ["serde"] }
 
 [[bin]]
 name = "starlab-desktop"
