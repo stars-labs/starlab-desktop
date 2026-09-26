@@ -152,7 +152,7 @@ pub struct State {
 
     // DKG state
     dkg_active: bool,
-    creating_wallet: bool,
+    ceremony_open: bool,
     dkg_current_round: u8,
     dkg_progress: f32,
 
@@ -240,7 +240,7 @@ impl State {
             available_sessions: Vec::new(),
             active_session: None,
             dkg_active: false,
-            creating_wallet: false,
+            ceremony_open: false,
             dkg_current_round: 0,
             dkg_progress: 0.0,
             offline_enabled: false,
@@ -586,7 +586,7 @@ impl State {
                     self.status_message = "Wallet ceremony in progress".to_string();
                 }
             }
-            UiEvent::CreatingWallet(creating) => self.creating_wallet = creating,
+            UiEvent::CeremonyOpen(open) => self.ceremony_open = open,
             UiEvent::DkgParticipants(_participants) => {
                 // TODO(iced): render a per-participant round table; for
                 // now the DKG progress bar (driven by DkgStatus) suffices.
@@ -658,11 +658,11 @@ impl State {
     }
 
     /// A wallet action is queued, or the runner still has a ceremony open.
-    /// `pending_action` clears as soon as Create is sent, so without
-    /// `creating_wallet` the button re-enables while waiting for peers and a
-    /// second click would announce a second session.
+    /// `pending_action` clears as soon as Create/Join is sent, so without
+    /// `ceremony_open` the buttons re-enable while waiting for peers and a
+    /// second click would start a second ceremony.
     fn wallet_busy(&self) -> bool {
-        self.pending_action.is_some() || self.dkg_active || self.creating_wallet
+        self.pending_action.is_some() || self.dkg_active || self.ceremony_open
     }
 
     fn invite_id(&self) -> Option<&str> {
@@ -1023,7 +1023,7 @@ impl State {
         let abort = button(text("Abort DKG"))
             .style(button::danger)
             .on_press_maybe(
-                (self.dkg_active || self.creating_wallet).then_some(Message::AbortDkg),
+                (self.dkg_active || self.ceremony_open).then_some(Message::AbortDkg),
             );
 
         card(
