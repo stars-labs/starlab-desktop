@@ -28,8 +28,8 @@ uuid = { version = "1.11.0", features = ["v4"] }
 
 # Directly construct the shared headless runner so the desktop shell can update
 # the signal-server URL at runtime before reconnecting.
-frost-ed25519 = { version = "2.2.0", features = ["serde", "serialization"] }
-frost-secp256k1 = { version = "2.2.0", features = ["serde", "serialization"] }
+frost-ed25519 = { version = "3.0.0", features = ["serde", "serialization"] }
+frost-secp256k1 = { version = "3.0.0", features = ["serde", "serialization"] }
 
 # Async runtime for the core managers + the mpsc UICallback bridge +
 # tokio::task::spawn_blocking for rfd dialogs.

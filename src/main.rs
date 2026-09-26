@@ -1651,7 +1651,7 @@ mod tests {
     #[test]
     fn joined_session_is_not_shown_as_own_invite() {
         let joined = session("s1", "peer");
-        assert_eq!(own_invite_id("me", Some(&joined), &[joined.clone()]), None);
+        assert_eq!(own_invite_id("me", Some(&joined), std::slice::from_ref(&joined)), None);
     }
 
     #[test]
