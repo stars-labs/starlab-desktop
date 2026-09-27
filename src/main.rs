@@ -113,6 +113,8 @@ pub enum Message {
     SignMessage,
     ApproveSigning,
     RejectSigning,
+    /// Close a failed / finished signing card.
+    DismissSigning,
     ExportToSdCard,
     ImportFromSdCard,
     ClearSdCard,
@@ -494,6 +496,10 @@ impl State {
                 let adapter = self.adapter.clone();
                 let id = self.signing_request_id.clone();
                 action(async move { adapter.reject_signing(id).await })
+            }
+            Message::DismissSigning => {
+                let adapter = self.adapter.clone();
+                action(async move { adapter.dismiss_signing().await })
             }
             Message::ExportToSdCard => {
                 let adapter = self.adapter.clone();
@@ -1319,6 +1325,28 @@ impl State {
             "Signing…"
         };
 
+        // A failed / finished ceremony can't be approved or rejected any
+        // more — only closed (a new request replaces the card on its own).
+        let buttons: Element<'_, Message> = if signing_card_closable(&self.signing_state) {
+            row![
+                Space::new().width(Length::Fill),
+                button(text("Dismiss")).on_press(Message::DismissSigning),
+            ]
+            .into()
+        } else {
+            row![
+                button(text("Reject"))
+                    .style(button::danger)
+                    .on_press(Message::RejectSigning),
+                Space::new().width(Length::Fill),
+                button(text(approve_label))
+                    .style(button::primary)
+                    .on_press_maybe(awaiting.then_some(Message::ApproveSigning)),
+            ]
+            .spacing(12)
+            .into()
+        };
+
         let title = if self.signing_from_peer {
             "Co-signer approval requested"
         } else {
@@ -1340,21 +1368,17 @@ impl State {
                 text_input("Wallet password", &self.dkg_password)
                     .secure(true)
                     .on_input(Message::KeystorePasswordChanged),
-                row![
-                    button(text("Reject"))
-                        .style(button::danger)
-                        .on_press(Message::RejectSigning),
-                    Space::new().width(Length::Fill),
-                    button(text(approve_label))
-                        .style(button::primary)
-                        .on_press_maybe(awaiting.then_some(Message::ApproveSigning)),
-                ]
-                .spacing(12),
+                buttons,
             ]
             .spacing(10)
             .into(),
         )
     }
+}
+
+/// The signing card's ceremony is over (`signing_state` as rendered).
+fn signing_card_closable(signing_state: &str) -> bool {
+    matches!(signing_state, "failed" | "complete")
 }
 
 fn generate_room_id() -> String {
@@ -1656,7 +1680,17 @@ fn status_color(status: &str) -> Color {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionInfo, SessionStatus, own_invite_id, split_signal_room};
+    use super::{
+        SessionInfo, SessionStatus, own_invite_id, signing_card_closable, split_signal_room,
+    };
+
+    #[test]
+    fn failed_or_finished_signing_card_is_closable() {
+        assert!(signing_card_closable("failed"));
+        assert!(signing_card_closable("complete"));
+        assert!(!signing_card_closable("awaiting_approval"));
+        assert!(!signing_card_closable("share"));
+    }
 
     fn session(id: &str, initiator: &str) -> SessionInfo {
         SessionInfo {

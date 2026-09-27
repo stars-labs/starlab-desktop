@@ -386,6 +386,14 @@ impl CoreAdapter {
             .map_err(|e| e.to_string())
     }
 
+    /// Close a signing card whose ceremony failed or finished.
+    pub async fn dismiss_signing(&self) -> Result<(), String> {
+        self.signing_manager
+            .dismiss()
+            .await
+            .map_err(|e| e.to_string())
+    }
+
     /// Export an artefact to a user-chosen SD-card directory.
     ///
     /// Opens an rfd folder-picker; the caller's `data_type` is used
@@ -831,15 +839,38 @@ mod tests {
         let _ = std::fs::remove_dir_all(keystore);
     }
 
-    /// A real adapter (unreachable signal server) for device `me` holding
-    /// wallet `w1`, plus the receiving end of its UI channel.
-    fn adapter_holding_w1() -> (
+    /// A real adapter (unreachable signal server) for device `me` whose
+    /// keystore holds wallet `w1`, plus the receiving end of its UI channel.
+    /// Returns once the runner has loaded the wallet (an announce processed
+    /// before that would not be for "a wallet we hold").
+    async fn adapter_holding_w1() -> (
         CoreAdapter,
         tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
         std::path::PathBuf,
     ) {
         let keystore = std::env::temp_dir().join(format!("starlab-test-{}", uuid::Uuid::new_v4()));
-        let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        let wallet_dir = keystore.join("me").join("secp256k1");
+        std::fs::create_dir_all(&wallet_dir).unwrap();
+        let wallet_file = serde_json::json!({
+            "version": "2.0",
+            "encrypted": true,
+            "algorithm": "AES-256-GCM-PBKDF2",
+            "data": "",
+            "metadata": {
+                "session_id": "w1",
+                "device_id": "me",
+                "curve_type": "secp256k1",
+                "threshold": 2,
+                "total_participants": 3,
+                "participant_index": 2,
+                "group_public_key": "",
+                "created_at": "",
+                "last_modified": "",
+            },
+        });
+        std::fs::write(wallet_dir.join("w1.json"), wallet_file.to_string()).unwrap();
+
+        let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
         let adapter = CoreAdapter::new(
             ui_tx,
             "me".to_string(),
@@ -847,28 +878,25 @@ mod tests {
             "ws://127.0.0.1:9".to_string(),
             "secp256k1".to_string(),
         );
-        let wallet = serde_json::from_value(serde_json::json!({
-            "session_id": "w1",
-            "device_id": "me",
-            "curve_type": "secp256k1",
-            "threshold": 2,
-            "total_participants": 3,
-            "participant_index": 2,
-            "group_public_key": "",
-            "created_at": "",
-            "last_modified": "",
-        }))
-        .unwrap();
-        adapter
-            .runner_tx
-            .send(Message::WalletsLoaded {
-                wallets: vec![wallet],
-            })
-            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let UiEvent::WalletsRich(wallets) = ui_rx.recv().await.unwrap()
+                    && !wallets.is_empty()
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("runner never loaded the test wallet");
         (adapter, ui_rx, keystore)
     }
 
     fn peer_signing_announce() -> Message {
+        peer_signing_announce_with("deadbeef")
+    }
+
+    fn peer_signing_announce_with(message_hex: &str) -> Message {
         Message::SessionDiscovered {
             session: SignalSession {
                 session_id: "sign-1".to_string(),
@@ -884,7 +912,7 @@ mod tests {
                 },
                 curve_type: "secp256k1".to_string(),
                 coordination_type: "network".to_string(),
-                signing_message_hex: Some("deadbeef".to_string()),
+                signing_message_hex: Some(message_hex.to_string()),
             },
         }
     }
@@ -908,7 +936,7 @@ mod tests {
 
     #[tokio::test]
     async fn peer_signing_session_opens_the_approval_prompt() {
-        let (adapter, mut ui_rx, keystore) = adapter_holding_w1();
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1().await;
         adapter.runner_tx.send(peer_signing_announce()).unwrap();
 
         let req = next_signing_request(&mut ui_rx)
@@ -921,7 +949,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejecting_a_peer_request_closes_the_prompt_and_drops_the_invite() {
-        let (adapter, mut ui_rx, keystore) = adapter_holding_w1();
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1().await;
         adapter.runner_tx.send(peer_signing_announce()).unwrap();
         let req = next_signing_request(&mut ui_rx).await.unwrap();
 
@@ -940,6 +968,51 @@ mod tests {
         })
         .await
         .expect("declined session never left the session list");
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn new_request_replaces_a_failed_card_and_dismiss_closes_it() {
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1().await;
+        adapter.runner_tx.send(peer_signing_announce()).unwrap();
+        next_signing_request(&mut ui_rx).await.unwrap();
+        *adapter.state.signing_state.lock().await =
+            starlab_client::core::SigningState::Failed("timeout".into());
+
+        // Same session id, new message: the card is replaced.
+        adapter
+            .runner_tx
+            .send(peer_signing_announce_with("cafe"))
+            .unwrap();
+        let replaced = next_signing_request(&mut ui_rx).await.unwrap();
+        assert_eq!(replaced.message_hex, "cafe");
+
+        *adapter.state.signing_state.lock().await =
+            starlab_client::core::SigningState::Failed("timeout".into());
+        adapter.dismiss_signing().await.unwrap();
+        assert!(next_signing_request(&mut ui_rx).await.is_none());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn bitcoin_account_request_shows_bitcoin() {
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1().await;
+        let Message::SessionDiscovered { mut session } = peer_signing_announce() else {
+            unreachable!()
+        };
+        // The announce's `blockchain` says ethereum; the account id wins.
+        session.session_type = SessionType::Signing {
+            wallet_name: "w1-bitcoin-0".to_string(),
+            curve_type: "secp256k1".to_string(),
+            blockchain: "ethereum".to_string(),
+            group_public_key: String::new(),
+        };
+        adapter
+            .runner_tx
+            .send(Message::SessionDiscovered { session })
+            .unwrap();
+        let req = next_signing_request(&mut ui_rx).await.unwrap();
+        assert_eq!(req.chain, "bitcoin");
         let _ = std::fs::remove_dir_all(keystore);
     }
 }
