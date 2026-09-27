@@ -27,7 +27,7 @@ const DEFAULT_TOTAL: u16 = 3;
 const DEFAULT_THRESHOLD: u16 = 2;
 
 enum RunnerControl {
-    Secp256k1(Arc<Mutex<AppState<frost_secp256k1::Secp256K1Sha256>>>),
+    Secp256k1(Arc<Mutex<AppState<frost_secp256k1_tr::Secp256K1Sha256TR>>>),
     Ed25519(Arc<Mutex<AppState<frost_ed25519::Ed25519Sha512>>>),
 }
 
@@ -54,12 +54,12 @@ where
     F: Fn(&Model, Option<&Message>) + Send + 'static,
 {
     let app_state = Arc::new(Mutex::new(
-        AppState::<frost_secp256k1::Secp256K1Sha256>::with_device_id_and_server(
+        AppState::<frost_secp256k1_tr::Secp256K1Sha256TR>::with_device_id_and_server(
             device_id.clone(),
             signal_url,
         ),
     ));
-    let runner = HeadlessRunner::<frost_secp256k1::Secp256K1Sha256>::new(
+    let runner = HeadlessRunner::<frost_secp256k1_tr::Secp256K1Sha256TR>::new(
         device_id,
         keystore_path,
         app_state.clone(),
