@@ -232,9 +232,47 @@ fn model_wallets(model: &Model) -> Vec<WalletInfo> {
         .collect()
 }
 
-/// The session to show as active. A finished DKG's session lingers on the
-/// model after finalize; it is not "active" any more.
-fn shown_active_session(model: &Model) -> Option<SessionInfo> {
+/// Signing sessions this device saw finish (completed or failed), keyed by
+/// (session id, message): signing on a warm mesh reuses session ids.
+type FinishedSigning = std::collections::HashSet<(String, Option<String>)>;
+
+fn signing_key(
+    session: &starlab_client::protocal::signal::SessionInfo,
+) -> Option<(String, Option<String>)> {
+    matches!(
+        session.session_type,
+        starlab_client::protocal::signal::SessionType::Signing { .. }
+    )
+    .then(|| {
+        (
+            session.session_id.clone(),
+            session.signing_message_hex.clone(),
+        )
+    })
+}
+
+/// Remember the signing session this device was in when its ceremony ended.
+/// The engine leaves it on `active_session` afterwards.
+fn note_finished_signing(model: &Model, msg: &Message, finished: &mut FinishedSigning) {
+    if matches!(
+        msg,
+        Message::SigningComplete { .. } | Message::SigningFailed { .. }
+    ) && let Some(key) = model.active_session.as_ref().and_then(signing_key)
+    {
+        finished.insert(key);
+    }
+}
+
+fn signing_finished(
+    session: &starlab_client::protocal::signal::SessionInfo,
+    finished: &FinishedSigning,
+) -> bool {
+    signing_key(session).is_some_and(|k| finished.contains(&k))
+}
+
+/// The session to show as active. A finished DKG's or signing ceremony's
+/// session lingers on the model afterwards; it is not "active" any more.
+fn shown_active_session(model: &Model, finished: &FinishedSigning) -> Option<SessionInfo> {
     let session = model.active_session.as_ref()?;
     let dkg_done = matches!(
         model.wallet_state.dkg_round,
@@ -243,7 +281,10 @@ fn shown_active_session(model: &Model) -> Option<SessionInfo> {
     if dkg_done && session.session_type == starlab_client::protocal::signal::SessionType::DKG {
         return None;
     }
-    Some(model_session_info(session))
+    if signing_finished(session, finished) {
+        return None;
+    }
+    Some(model_session_info(session, finished))
 }
 
 /// `(any data channel open, per-peer mesh entries)` from the runner's
@@ -272,13 +313,18 @@ fn mesh_status(model: &Model) -> (bool, Vec<ConnectionInfo>) {
     (any_open, peers)
 }
 
-fn model_session_info(session: &starlab_client::protocal::signal::SessionInfo) -> SessionInfo {
+fn model_session_info(
+    session: &starlab_client::protocal::signal::SessionInfo,
+    finished: &FinishedSigning,
+) -> SessionInfo {
     SessionInfo {
         session_id: session.session_id.clone(),
         initiator: session.proposer_id.clone(),
         participants: session.participants.clone(),
         threshold: (session.threshold, session.total),
-        status: if session.participants.len() >= usize::from(session.total) {
+        status: if signing_finished(session, finished) {
+            SessionStatus::Completed
+        } else if session.participants.len() >= usize::from(session.total) {
             SessionStatus::InProgress
         } else {
             SessionStatus::Waiting
@@ -321,6 +367,7 @@ impl CoreAdapter {
         // turns a peer's signing announce into the approval prompt.
         let signing_slot: SigningSlot = Arc::new(std::sync::Mutex::new(None));
         let signing_for_sync = signing_slot.clone();
+        let finished_signing: std::sync::Mutex<FinishedSigning> = Default::default();
         let on_sync = move |model: &Model, msg: Option<&starlab_client::elm::Message>| {
             if let Some(m) = msg {
                 if let Ok(guard) = signing_for_sync.lock() {
@@ -332,12 +379,19 @@ impl CoreAdapter {
             }
             let cb = cb_for_sync.clone();
             let wallets = model_wallets(model);
-            let active_session = shown_active_session(model);
+            let finished = {
+                let mut finished = finished_signing.lock().unwrap_or_else(|e| e.into_inner());
+                if let Some(m) = msg {
+                    note_finished_signing(model, m, &mut finished);
+                }
+                finished.clone()
+            };
+            let active_session = shown_active_session(model, &finished);
             let (webrtc, mesh) = mesh_status(model);
             let available_sessions = model
                 .session_invites
                 .iter()
-                .map(model_session_info)
+                .map(|s| model_session_info(s, &finished))
                 .collect::<Vec<_>>();
             // Multi-chain wallet list straight down the channel (not a trait method).
             let _ = ui_tx_rich.send(UiEvent::WalletsRich(rich_wallets(model)));
@@ -1181,9 +1235,41 @@ mod tests {
             coordination_type: "network".to_string(),
             signing_message_hex: None,
         });
-        assert!(shown_active_session(&model).is_some());
+        assert!(shown_active_session(&model, &FinishedSigning::new()).is_some());
 
         model.wallet_state.dkg_round = starlab_client::elm::message::DKGRound::Complete;
-        assert!(shown_active_session(&model).is_none());
+        assert!(shown_active_session(&model, &FinishedSigning::new()).is_none());
+    }
+
+    #[test]
+    fn finished_signing_session_is_not_shown_as_active_or_in_progress() {
+        let mut model = Model::new("me".into());
+        let Message::SessionDiscovered { session } = peer_signing_announce() else {
+            unreachable!()
+        };
+        model.active_session = Some(session.clone());
+        let mut finished = FinishedSigning::new();
+        assert!(shown_active_session(&model, &finished).is_some());
+
+        note_finished_signing(
+            &model,
+            &Message::SigningComplete {
+                request_id: "r".into(),
+                message: vec![],
+                signature: vec![],
+            },
+            &mut finished,
+        );
+
+        assert!(shown_active_session(&model, &finished).is_none());
+        assert_eq!(
+            model_session_info(&session, &finished).status,
+            SessionStatus::Completed
+        );
+        // A new ceremony on the same session id (new message) is live again.
+        let mut next = session;
+        next.signing_message_hex = Some("cafe".into());
+        model.active_session = Some(next);
+        assert!(shown_active_session(&model, &finished).is_some());
     }
 }
