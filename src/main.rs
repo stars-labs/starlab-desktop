@@ -1057,7 +1057,7 @@ impl State {
     fn operations_tab(&self) -> Element<'_, Message> {
         let connected = self.websocket_connected;
         let wallet_ready = !self.wallets.is_empty() || self.has_keystore;
-        let can_sign = self.has_keystore && self.signing_state == "idle";
+        let can_sign = self.has_keystore && signing_ready(&self.signing_state);
         let is_creating = self.pending_action == Some(PendingAction::CreateWallet);
         let is_joining = self.pending_action == Some(PendingAction::JoinWallet);
         let busy = self.wallet_busy();
@@ -1280,7 +1280,7 @@ impl State {
             .into(),
         );
 
-        let can_sign = self.has_keystore && self.signing_state == "idle";
+        let can_sign = self.has_keystore && signing_ready(&self.signing_state);
         let last_sig: Element<'_, Message> = if self.last_signature.is_empty() {
             Space::new().into()
         } else {
@@ -1374,6 +1374,13 @@ impl State {
             .into(),
         )
     }
+}
+
+/// No ceremony is pending or running, so a new one can be requested. A
+/// completed / failed ceremony leaves the engine's state on `complete` /
+/// `failed` rather than `idle`; neither blocks the next request.
+fn signing_ready(signing_state: &str) -> bool {
+    matches!(signing_state, "idle" | "complete" | "failed")
 }
 
 /// The signing card's ceremony is over (`signing_state` as rendered).
@@ -1681,8 +1688,23 @@ fn status_color(status: &str) -> Color {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionInfo, SessionStatus, own_invite_id, signing_card_closable, split_signal_room,
+        SessionInfo, SessionStatus, own_invite_id, signing_card_closable, signing_ready,
+        split_signal_room,
     };
+
+    #[test]
+    fn signing_is_available_again_after_a_ceremony_ends() {
+        assert!(signing_ready("idle"));
+        assert!(signing_ready("complete"));
+        assert!(signing_ready("failed"));
+    }
+
+    #[test]
+    fn signing_is_blocked_while_a_request_is_pending_or_running() {
+        for state in ["awaiting_approval", "commitment", "share", "aggregating"] {
+            assert!(!signing_ready(state), "{state}");
+        }
+    }
 
     #[test]
     fn failed_or_finished_signing_card_is_closable() {
