@@ -474,12 +474,26 @@ impl State {
                 if self.pending_action.is_some() {
                     return Task::none();
                 }
+                let Some(wallet) = self
+                    .wallets
+                    .get(self.active_wallet_index)
+                    .or_else(|| self.wallets.first())
+                else {
+                    self.status_message = "No wallet to sign with".to_string();
+                    return Task::none();
+                };
+                let chain = self.sign_chain.trim().to_lowercase();
+                let wallet_id = signing_wallet_id(&wallet.id, &chain, self.selected_account);
                 let adapter = self.adapter.clone();
                 let hex = self.sign_hex.clone();
-                let chain = self.sign_chain.clone();
                 self.status_message = "Requesting MPC signature".to_string();
                 self.pending_action = Some(PendingAction::Sign);
-                action(async move { adapter.request_signing(hex, chain, None).await.map(|_| ()) })
+                action(async move {
+                    adapter
+                        .request_signing(wallet_id, hex, chain, None)
+                        .await
+                        .map(|_| ())
+                })
             }
             Message::ApproveSigning => {
                 let adapter = self.adapter.clone();
@@ -1376,6 +1390,27 @@ impl State {
     }
 }
 
+/// The keystore id to sign as: the selected BIP-44 account of `chain`
+/// (`{root}-{chain}-{account}`, derived on first use by the engine), or the
+/// root id when `chain` isn't a known chain (the engine then signs as the
+/// runner curve's primary chain, account 0).
+fn signing_wallet_id(root_id: &str, chain: &str, account: u32) -> String {
+    let chain = match chain {
+        "eth" => "ethereum",
+        "btc" => "bitcoin",
+        "sol" => "solana",
+        other => other,
+    };
+    let account_id = format!("{root_id}-{chain}-{account}");
+    if starlab_core::accounts::standard_path(chain, account).is_some()
+        && starlab_core::accounts::parse_child_wallet_id(&account_id).is_some()
+    {
+        account_id
+    } else {
+        root_id.to_string()
+    }
+}
+
 /// No ceremony is pending or running, so a new one can be requested. A
 /// completed / failed ceremony leaves the engine's state on `complete` /
 /// `failed` rather than `idle`; neither blocks the next request.
@@ -1689,8 +1724,20 @@ fn status_color(status: &str) -> Color {
 mod tests {
     use super::{
         SessionInfo, SessionStatus, own_invite_id, signing_card_closable, signing_ready,
-        split_signal_room,
+        signing_wallet_id, split_signal_room,
     };
+
+    #[test]
+    fn signing_uses_the_selected_account_of_the_chain() {
+        assert_eq!(signing_wallet_id("0b87", "bitcoin", 2), "0b87-bitcoin-2");
+        assert_eq!(signing_wallet_id("0b87", "ethereum", 0), "0b87-ethereum-0");
+        assert_eq!(signing_wallet_id("0b87", "btc", 0), "0b87-bitcoin-0");
+    }
+
+    #[test]
+    fn unknown_chain_signs_with_the_root_id() {
+        assert_eq!(signing_wallet_id("0b87", "dogecoin", 0), "0b87");
+    }
 
     #[test]
     fn signing_is_available_again_after_a_ceremony_ends() {

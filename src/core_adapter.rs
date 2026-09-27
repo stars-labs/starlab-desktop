@@ -349,12 +349,13 @@ impl CoreAdapter {
     /// request id so the caller can pair approve/reject later.
     pub async fn request_signing(
         &self,
+        wallet_id: String,
         message_hex: String,
         chain: String,
         display_label: Option<String>,
     ) -> Result<String, String> {
         self.signing_manager
-            .request_signing(message_hex, chain, display_label)
+            .request_signing(wallet_id, message_hex, chain, display_label)
             .await
             .map_err(|e| e.to_string())
     }
@@ -1013,6 +1014,36 @@ mod tests {
             .unwrap();
         let req = next_signing_request(&mut ui_rx).await.unwrap();
         assert_eq!(req.chain, "bitcoin");
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    /// A fresh process (wallet only on disk, no DKG/import in this run)
+    /// can start signing: the request names the wallet by id instead of an
+    /// index into a list that only DKG/import used to fill.
+    #[tokio::test]
+    async fn fresh_adapter_signs_with_a_keystore_wallet() {
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1().await;
+        let id = adapter
+            .request_signing(
+                "w1-ethereum-0".to_string(),
+                "deadbeef".to_string(),
+                "ethereum".to_string(),
+                None,
+            )
+            .await
+            .unwrap();
+        let req = next_signing_request(&mut ui_rx).await.unwrap();
+        assert_eq!(req.wallet_id, "w1-ethereum-0");
+
+        adapter.set_dkg_password("password1".to_string());
+        // The ceremony itself can't finish here (no peers, dummy share);
+        // what matters is that approval gets past wallet resolution.
+        if let Ok(Err(e)) =
+            tokio::time::timeout(Duration::from_secs(2), adapter.approve_signing(id)).await
+        {
+            assert!(!e.contains("out of range"), "{e}");
+            assert!(!e.contains("no pending signing request"), "{e}");
+        }
         let _ = std::fs::remove_dir_all(keystore);
     }
 }
