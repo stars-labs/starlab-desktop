@@ -2,7 +2,8 @@
 
 use starlab_client::AppState;
 use starlab_client::core::{
-    CoreState, SessionInfo, SessionStatus, UICallback, WalletInfo,
+    ConnectionInfo, ConnectionStatus, CoreState, SessionInfo, SessionStatus, UICallback,
+    WalletInfo,
     dkg_manager::DkgManager,
     offline_manager::OfflineManager,
     session_manager::SessionManager,
@@ -94,6 +95,44 @@ where
     let tx = runner.sender();
     tokio::spawn(runner.run());
     (tx, RunnerControl::Ed25519(app_state))
+}
+
+/// Env overrides that skip the native file dialogs (headless / Xvfb runs have
+/// no desktop file portal, so the dialog would never open).
+const IMPORT_PATH_ENV: &str = "MPC_IMPORT_PATH";
+const EXPORT_PATH_ENV: &str = "MPC_EXPORT_PATH";
+
+/// A dialog that has not answered by then is treated as unable to open.
+const DIALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+fn env_path(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|p| !p.trim().is_empty())
+}
+
+/// The file path to use: `override_path` when set (from `env_var`), else the
+/// native `dialog`'s answer. `Ok(None)` means the user cancelled; a dialog
+/// that fails or never opens is an error naming the override.
+async fn pick_path<F>(
+    override_path: Option<String>,
+    env_var: &str,
+    dialog: F,
+) -> Result<Option<String>, String>
+where
+    F: FnOnce() -> Option<std::path::PathBuf> + Send + 'static,
+{
+    if let Some(path) = override_path {
+        return Ok(Some(path));
+    }
+    match tokio::time::timeout(DIALOG_TIMEOUT, tokio::task::spawn_blocking(dialog)).await {
+        Ok(Ok(path)) => Ok(path.map(|p| p.to_string_lossy().into_owned())),
+        Ok(Err(e)) => Err(format!(
+            "The file dialog failed ({e}). Set {env_var} to a file path instead."
+        )),
+        Err(_) => Err(format!(
+            "The file dialog did not open (no desktop file portal?). Set {env_var} to a file \
+             path instead."
+        )),
+    }
 }
 
 /// Late-bound signing observers fed from the runner's `on_sync`.
@@ -193,6 +232,46 @@ fn model_wallets(model: &Model) -> Vec<WalletInfo> {
         .collect()
 }
 
+/// The session to show as active. A finished DKG's session lingers on the
+/// model after finalize; it is not "active" any more.
+fn shown_active_session(model: &Model) -> Option<SessionInfo> {
+    let session = model.active_session.as_ref()?;
+    let dkg_done = matches!(
+        model.wallet_state.dkg_round,
+        starlab_client::elm::message::DKGRound::Complete
+    );
+    if dkg_done && session.session_type == starlab_client::protocal::signal::SessionType::DKG {
+        return None;
+    }
+    Some(model_session_info(session))
+}
+
+/// `(any data channel open, per-peer mesh entries)` from the runner's
+/// per-participant WebRTC status.
+fn mesh_status(model: &Model) -> (bool, Vec<ConnectionInfo>) {
+    let mut peers: Vec<ConnectionInfo> = model
+        .network_state
+        .participant_webrtc_status
+        .iter()
+        .filter(|(_, (webrtc, channel))| *webrtc || *channel)
+        .map(|(peer, (_, channel))| ConnectionInfo {
+            peer_id: peer.clone(),
+            status: if *channel {
+                ConnectionStatus::Connected
+            } else {
+                ConnectionStatus::Connecting
+            },
+            latency_ms: 0,
+            quality: 1.0,
+        })
+        .collect();
+    peers.sort_by(|a, b| a.peer_id.cmp(&b.peer_id));
+    let any_open = peers
+        .iter()
+        .any(|p| p.status == ConnectionStatus::Connected);
+    (any_open, peers)
+}
+
 fn model_session_info(session: &starlab_client::protocal::signal::SessionInfo) -> SessionInfo {
     SessionInfo {
         session_id: session.session_id.clone(),
@@ -253,7 +332,8 @@ impl CoreAdapter {
             }
             let cb = cb_for_sync.clone();
             let wallets = model_wallets(model);
-            let active_session = model.active_session.as_ref().map(model_session_info);
+            let active_session = shown_active_session(model);
+            let (webrtc, mesh) = mesh_status(model);
             let available_sessions = model
                 .session_invites
                 .iter()
@@ -286,10 +366,12 @@ impl CoreAdapter {
                 cb.update_wallets(wallets).await;
                 cb.update_active_session(active_session).await;
                 cb.update_available_sessions(available_sessions).await;
-                cb.update_connection_status(connected, false).await;
+                cb.update_connection_status(connected, webrtc).await;
+                cb.update_mesh_connections(mesh).await;
                 cb.update_dkg_status(active, round, progress).await;
             });
         };
+        let wallet_keystore_path = keystore_path.clone();
         let (runner_tx, runner_control) = if curve == "ed25519" {
             spawn_ed25519_runner(device_id.clone(), keystore_path, signal_url, on_sync)
         } else {
@@ -308,7 +390,12 @@ impl CoreAdapter {
         Self {
             session_manager: Arc::new(SessionManager::new(state.clone(), ui_callback.clone())),
             dkg_manager: Arc::new(DkgManager::new(state.clone(), ui_callback.clone())),
-            wallet_manager: Arc::new(WalletManager::new(state.clone(), ui_callback.clone())),
+            // Import/export work on the same on-disk keystore the runner uses;
+            // the runner re-reads it on `ListWallets`.
+            wallet_manager: Arc::new(
+                WalletManager::new(state.clone(), ui_callback.clone())
+                    .with_keystore(wallet_keystore_path, device_id.clone()),
+            ),
             offline_manager: Arc::new(OfflineManager::new(state.clone(), ui_callback.clone())),
             signing_manager: {
                 // Real FROST signing (#94): SigningManager drives the SAME elm
@@ -600,22 +687,18 @@ impl CoreAdapter {
             .map_err(|e| e.to_string())
     }
 
-    /// Import a keystore from disk. Opens a native file-picker for
-    /// the `.dat` path, then passes the user-supplied password to
-    /// `WalletManager::import_wallet` for decryption. Pass `""` if
-    /// the keystore is unencrypted.
+    /// Import an exported key-share file (encrypted with `password`) into
+    /// this device's keystore, then have the runner re-read the keystore so
+    /// the wallet shows up. The file comes from `MPC_IMPORT_PATH` when set,
+    /// else from a native file-picker.
     pub async fn import_wallet(&self, password: String) -> Result<(), String> {
-        // `rfd::AsyncFileDialog` is async-friendly but its await
-        // point runs on the GUI thread; keep this on tokio's
-        // blocking scheduler to avoid blocking the Slint event loop.
-        let Some(handle) = tokio::task::spawn_blocking(|| {
+        let Some(path) = pick_path(env_path(IMPORT_PATH_ENV), IMPORT_PATH_ENV, || {
             rfd::FileDialog::new()
-                .add_filter("MPC keystore", &["dat", "json"])
-                .set_title("Import MPC keystore")
+                .add_filter("Starlab key share", &["json"])
+                .set_title("Import wallet key share")
                 .pick_file()
         })
-        .await
-        .map_err(|e| e.to_string())?
+        .await?
         else {
             self.ui_callback
                 .show_message("Import cancelled".to_string(), false)
@@ -623,34 +706,35 @@ impl CoreAdapter {
             return Ok(());
         };
 
-        let path = handle.to_string_lossy().into_owned();
-        let msg = if password.is_empty() {
-            format!("Importing keystore from {path} (no password)...")
-        } else {
-            format!("Importing keystore from {path}...")
-        };
-        self.ui_callback.show_message(msg, false).await;
-
+        self.ui_callback
+            .show_message(format!("Importing wallet key share from {path}..."), false)
+            .await;
         self.wallet_manager
             .import_wallet(path, password)
             .await
-            .map_err(|e| e.to_string())
+            .map_err(|e| e.to_string())?;
+        let _ = self.runner_tx.send(Message::ListWallets);
+        Ok(())
     }
 
-    /// Export the active wallet to a keystore file. Opens a native
-    /// save dialog for the destination path; the user-supplied
-    /// password is used to encrypt the output. Pass `""` to write
-    /// an unencrypted keystore.
-    pub async fn export_wallet(&self, password: String) -> Result<(), String> {
-        let Some(handle) = tokio::task::spawn_blocking(|| {
+    /// Export this device's key share of `wallet_id` (`curve`) as a file
+    /// encrypted with `password` (the wallet's password). The target comes
+    /// from `MPC_EXPORT_PATH` when set, else from a native save dialog.
+    pub async fn export_wallet(
+        &self,
+        wallet_id: String,
+        curve: String,
+        password: String,
+    ) -> Result<(), String> {
+        let file_name = format!("{wallet_id}-{curve}.json");
+        let Some(path) = pick_path(env_path(EXPORT_PATH_ENV), EXPORT_PATH_ENV, move || {
             rfd::FileDialog::new()
-                .add_filter("MPC keystore", &["dat"])
-                .set_title("Export MPC keystore")
-                .set_file_name("mpc-wallet.dat")
+                .add_filter("Starlab key share", &["json"])
+                .set_title("Export wallet key share")
+                .set_file_name(file_name)
                 .save_file()
         })
-        .await
-        .map_err(|e| e.to_string())?
+        .await?
         else {
             self.ui_callback
                 .show_message("Export cancelled".to_string(), false)
@@ -658,20 +742,8 @@ impl CoreAdapter {
             return Ok(());
         };
 
-        let path = handle.to_string_lossy().into_owned();
-
-        // Export the currently-active wallet. CoreState tracks the
-        // active index alongside the wallet list.
-        let active_index = *self.state.active_wallet_index.lock().await;
-        let msg = if password.is_empty() {
-            format!("Exporting wallet to {path} (unencrypted)...")
-        } else {
-            format!("Exporting wallet to {path}...")
-        };
-        self.ui_callback.show_message(msg, false).await;
-
         self.wallet_manager
-            .export_wallet(active_index, path, password)
+            .export_wallet(&wallet_id, &curve, path, password)
             .await
             .map_err(|e| e.to_string())
     }
@@ -1045,5 +1117,73 @@ mod tests {
             assert!(!e.contains("no pending signing request"), "{e}");
         }
         let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn path_override_skips_the_dialog() {
+        let path = pick_path(Some("/tmp/share.json".into()), IMPORT_PATH_ENV, || {
+            panic!("dialog must not open when the override is set")
+        })
+        .await
+        .unwrap();
+        assert_eq!(path.as_deref(), Some("/tmp/share.json"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_dialog_is_not_an_error() {
+        let path = pick_path(None, IMPORT_PATH_ENV, || None).await.unwrap();
+        assert_eq!(path, None);
+    }
+
+    #[tokio::test]
+    async fn failing_dialog_names_the_override() {
+        let err = pick_path(None, EXPORT_PATH_ENV, || panic!("no portal"))
+            .await
+            .unwrap_err();
+        assert!(err.contains(EXPORT_PATH_ENV), "{err}");
+    }
+
+    #[test]
+    fn open_data_channels_show_as_connected_mesh() {
+        let mut model = Model::new("me".into());
+        let status = &mut model.network_state.participant_webrtc_status;
+        status.insert("b".into(), (true, true));
+        status.insert("a".into(), (true, false));
+        status.insert("gone".into(), (false, false));
+
+        let (webrtc, mesh) = mesh_status(&model);
+
+        assert!(webrtc);
+        let peers: Vec<_> = mesh
+            .iter()
+            .map(|p| (p.peer_id.as_str(), &p.status))
+            .collect();
+        assert_eq!(
+            peers,
+            [
+                ("a", &ConnectionStatus::Connecting),
+                ("b", &ConnectionStatus::Connected)
+            ]
+        );
+    }
+
+    #[test]
+    fn finished_dkg_session_is_not_shown_as_active() {
+        let mut model = Model::new("me".into());
+        model.active_session = Some(SignalSession {
+            session_id: "dkg-1".to_string(),
+            proposer_id: "peer".to_string(),
+            total: 2,
+            threshold: 2,
+            participants: vec!["peer".to_string(), "me".to_string()],
+            session_type: SessionType::DKG,
+            curve_type: "secp256k1".to_string(),
+            coordination_type: "network".to_string(),
+            signing_message_hex: None,
+        });
+        assert!(shown_active_session(&model).is_some());
+
+        model.wallet_state.dkg_round = starlab_client::elm::message::DKGRound::Complete;
+        assert!(shown_active_session(&model).is_none());
     }
 }

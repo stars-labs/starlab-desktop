@@ -118,6 +118,8 @@ pub enum Message {
     ExportToSdCard,
     ImportFromSdCard,
     ClearSdCard,
+    /// Close the error banner.
+    DismissError,
 
     /// Result of a fire-and-forget async action (the core reports the
     /// real outcome via `Ui` events; this just logs failures).
@@ -177,6 +179,12 @@ pub struct State {
     // UI chrome
     device_id: String,
     status_message: String,
+    /// Last failure (action error, core error message, failed ceremony),
+    /// shown as a banner until dismissed — the header only shows the
+    /// connection state once connected, so errors must not live only there.
+    error_message: Option<String>,
+    /// Inline validation error for the password field.
+    password_error: Option<String>,
     pending_action: Option<PendingAction>,
     log_messages: Vec<String>,
     active_tab: Tab,
@@ -262,6 +270,8 @@ impl State {
             status_message: "Ready".to_string(),
             pending_action: None,
             log_messages: Vec::new(),
+            error_message: None,
+            password_error: None,
             active_tab: Tab::Operations,
             wallet_flow: WalletFlow::Join,
             new_wallet_name: String::new(),
@@ -316,6 +326,7 @@ impl State {
             }
             Message::KeystorePasswordChanged(v) => {
                 self.dkg_password = v;
+                self.password_error = None;
                 Task::none()
             }
             Message::WsUrlChanged(v) => {
@@ -398,7 +409,7 @@ impl State {
                 action(async move { adapter.connect_websocket(url).await })
             }
             Message::CreateWallet => {
-                if self.wallet_busy() {
+                if self.wallet_busy() || !self.check_new_password() {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
@@ -423,21 +434,25 @@ impl State {
                 action(async move { adapter.import_wallet(pw).await })
             }
             Message::ExportWallet => {
-                if self.pending_action.is_some() {
+                if self.pending_action.is_some() || !self.check_new_password() {
                     return Task::none();
                 }
+                let Some((wallet_id, curve)) = self.active_wallet_share() else {
+                    self.error_message = Some("No wallet to export".to_string());
+                    return Task::none();
+                };
                 let adapter = self.adapter.clone();
                 let pw = self.dkg_password.clone();
                 self.status_message = "Opening wallet export dialog".to_string();
                 self.pending_action = Some(PendingAction::ExportWallet);
-                action(async move { adapter.export_wallet(pw).await })
+                action(async move { adapter.export_wallet(wallet_id, curve, pw).await })
             }
             Message::CreateSession => {
                 let adapter = self.adapter.clone();
                 action(async move { adapter.create_session().await })
             }
             Message::JoinSession => {
-                if self.wallet_busy() {
+                if self.wallet_busy() || !self.check_new_password() {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
@@ -474,12 +489,16 @@ impl State {
                 if self.pending_action.is_some() {
                     return Task::none();
                 }
+                if self.sign_hex.trim().is_empty() {
+                    self.error_message = Some("Enter the message to sign".to_string());
+                    return Task::none();
+                }
                 let Some(wallet) = self
                     .wallets
                     .get(self.active_wallet_index)
                     .or_else(|| self.wallets.first())
                 else {
-                    self.status_message = "No wallet to sign with".to_string();
+                    self.error_message = Some("No wallet to sign with".to_string());
                     return Task::none();
                 };
                 let chain = self.sign_chain.trim().to_lowercase();
@@ -530,12 +549,17 @@ impl State {
                 action(async move { adapter.clear_sd_card().await })
             }
 
+            Message::DismissError => {
+                self.error_message = None;
+                Task::none()
+            }
             Message::ActionDone(result) => {
                 if let Err(e) = result {
                     self.pending_action = None;
                     tracing::warn!("native action failed: {e}");
                     self.push_log(format!("[ERROR] {e}"));
-                    self.status_message = e;
+                    self.status_message = e.clone();
+                    self.error_message = Some(e);
                 } else if matches!(
                     self.pending_action,
                     Some(
@@ -667,14 +691,20 @@ impl State {
                     SigningState::Failed(_) => "failed",
                 }
                 .to_string();
+                if let SigningState::Failed(reason) = state {
+                    self.error_message = Some(format!("Signing failed: {reason}"));
+                }
             }
             UiEvent::SigningComplete(sig) => self.last_signature = sig,
             UiEvent::Message {
                 log_line,
                 status,
-                is_error: _,
+                is_error,
             } => {
                 self.push_log(log_line);
+                if is_error {
+                    self.error_message = Some(status.clone());
+                }
                 self.status_message = status;
             }
             UiEvent::Progress(status) => self.status_message = status,
@@ -695,6 +725,24 @@ impl State {
     /// second click would start a second ceremony.
     fn wallet_busy(&self) -> bool {
         self.pending_action.is_some() || self.dkg_active || self.ceremony_open
+    }
+
+    /// Gate for actions that encrypt a key share with the typed password
+    /// (create / join DKG, export). Sets the inline error when it fails.
+    fn check_new_password(&mut self) -> bool {
+        self.password_error = password_problem(&self.dkg_password).map(str::to_string);
+        self.password_error.is_none()
+    }
+
+    /// `(wallet_id, curve)` of the selected wallet's share to export. A
+    /// unified wallet holds one share per curve; its first one is exported.
+    fn active_wallet_share(&self) -> Option<(String, String)> {
+        let wallet = self
+            .wallets
+            .get(self.active_wallet_index)
+            .or_else(|| self.wallets.first())?;
+        let (curve, _) = wallet.keys.first()?;
+        Some((wallet.id.clone(), curve.clone()))
     }
 
     fn invite_id(&self) -> Option<&str> {
@@ -786,7 +834,11 @@ impl State {
         // The signing confirm "modal" is rendered inline at the top of
         // the right panel when a request is pending (Iced has no native
         // overlay stacking in this layout, so we surface it prominently).
-        let mut content = column![tabs, self.dkg_progress_view()].spacing(14);
+        let mut content = column![tabs].spacing(14);
+        if let Some(error) = &self.error_message {
+            content = content.push(error_banner(error));
+        }
+        content = content.push(self.dkg_progress_view());
         if self.has_signing_request {
             content = content.push(self.signing_modal_view());
         }
@@ -1129,6 +1181,7 @@ impl State {
                 .size(12)
                 .color(muted()),
                 invite_row,
+                password_field(&self.dkg_password, self.password_error.as_deref()),
                 row![
                     text_input("Wallet name", &self.new_wallet_name)
                         .on_input(Message::NewWalletNameChanged)
@@ -1150,6 +1203,7 @@ impl State {
                 text("Use this on the other devices. Paste the invite ID from the creator.")
                     .size(12)
                     .color(muted()),
+                password_field(&self.dkg_password, self.password_error.as_deref()),
                 row![
                     text_input("Invite ID", &self.join_session_id)
                         .on_input(Message::JoinSessionIdChanged)
@@ -1215,18 +1269,51 @@ impl State {
                     "3",
                     "Sign message",
                     if can_sign {
-                        "Enter a message and request an MPC signature from this device."
+                        "Enter a message and request an MPC signature. You approve it with the wallet password next."
                     } else {
                         "Signing becomes available after this device has a wallet share."
                     },
                     if can_sign { "Ready" } else { "Blocked" },
-                    can_sign
-                        .then(|| button(text("Request signing")).on_press(Message::SignMessage).into()),
+                    None,
                 ),
+                self.sign_form(can_sign),
             ]
             .spacing(12)
             .into(),
         )
+    }
+
+    /// Message + chain inputs and the "Request signing" button (step 3).
+    fn sign_form(&self, can_sign: bool) -> Element<'_, Message> {
+        let can_request = can_sign && !self.sign_hex.trim().is_empty();
+        let last_sig: Element<'_, Message> = if self.last_signature.is_empty() {
+            Space::new().into()
+        } else {
+            text(format!(
+                "Last signature: {}",
+                short_addr(&self.last_signature)
+            ))
+            .size(11)
+            .color(muted())
+            .into()
+        };
+        column![
+            row![
+                text_input("Message hex (0x… or raw hex)", &self.sign_hex)
+                    .on_input(Message::SignHexChanged)
+                    .width(Length::Fill),
+                text_input("Chain", &self.sign_chain)
+                    .on_input(Message::SignChainChanged)
+                    .width(Length::Fixed(120.0)),
+                button(text("Request signing"))
+                    .on_press_maybe(can_request.then_some(Message::SignMessage)),
+            ]
+            .spacing(10)
+            .align_y(iced::Alignment::Center),
+            last_sig,
+        ]
+        .spacing(6)
+        .into()
     }
 
     fn logs_tab(&self) -> Element<'_, Message> {
@@ -1280,9 +1367,7 @@ impl State {
         let keystore = card(
             "Keystore (encrypted import/export)",
             column![
-                text_input("Keystore password", &self.dkg_password)
-                    .secure(true)
-                    .on_input(Message::KeystorePasswordChanged),
+                password_field(&self.dkg_password, self.password_error.as_deref()),
                 row![
                     button(text("Import with password…")).on_press(Message::ImportWallet),
                     button(text("Export with password…"))
@@ -1294,34 +1379,7 @@ impl State {
             .into(),
         );
 
-        let can_sign = self.has_keystore && signing_ready(&self.signing_state);
-        let last_sig: Element<'_, Message> = if self.last_signature.is_empty() {
-            Space::new().into()
-        } else {
-            text(format!(
-                "Last signature: {}",
-                short_addr(&self.last_signature)
-            ))
-            .size(11)
-            .color(muted())
-            .into()
-        };
-        let signing = card(
-            "Sign message (MPC)",
-            column![
-                text_input("Message hex (0x… or raw hex)", &self.sign_hex)
-                    .on_input(Message::SignHexChanged),
-                text_input("Chain (ethereum / solana / …)", &self.sign_chain)
-                    .on_input(Message::SignChainChanged),
-                button(text("Request signing"))
-                    .on_press_maybe(can_sign.then_some(Message::SignMessage)),
-                last_sig,
-            ]
-            .spacing(8)
-            .into(),
-        );
-
-        column![network, keystore, signing].spacing(16).into()
+        column![network, keystore].spacing(16).into()
     }
 
     /// The signing confirm modal (Slint `if has_signing_request`).
@@ -1355,7 +1413,10 @@ impl State {
                 Space::new().width(Length::Fill),
                 button(text(approve_label))
                     .style(button::primary)
-                    .on_press_maybe(awaiting.then_some(Message::ApproveSigning)),
+                    .on_press_maybe(
+                        (awaiting && !self.dkg_password.is_empty())
+                            .then_some(Message::ApproveSigning),
+                    ),
             ]
             .spacing(12)
             .into()
@@ -1379,6 +1440,9 @@ impl State {
                 text(format!("Phase: {}", self.signing_state))
                     .size(11)
                     .color(faint()),
+                text("Enter this wallet's password to approve.")
+                    .size(12)
+                    .color(muted()),
                 text_input("Wallet password", &self.dkg_password)
                     .secure(true)
                     .on_input(Message::KeystorePasswordChanged),
@@ -1530,6 +1594,49 @@ fn ui_bridge() -> impl iced::futures::Stream<Item = Message> {
 
 /// Wrap a fallible async core action into a `Task` that reports the
 /// outcome via `Message::ActionDone`.
+/// Dismissible banner for the last failure.
+fn error_banner(error: &str) -> Element<'_, Message> {
+    container(
+        row![
+            text(error).size(13).color(danger()).width(Length::Fill),
+            button(text("Dismiss").size(12)).on_press(Message::DismissError),
+        ]
+        .spacing(12)
+        .align_y(iced::Alignment::Center),
+    )
+    .padding(12)
+    .width(Length::Fill)
+    .style(panel_style)
+    .into()
+}
+
+/// Password input + its inline validation error (if any).
+fn password_field<'a>(password: &'a str, error: Option<&'a str>) -> Element<'a, Message> {
+    let input = text_input("Wallet password (min 8 characters)", password)
+        .secure(true)
+        .on_input(Message::KeystorePasswordChanged);
+    match error {
+        Some(e) => column![input, text(e).size(12).color(danger())]
+            .spacing(4)
+            .into(),
+        None => input.into(),
+    }
+}
+
+/// Minimum wallet password length (same rule as the browser extension).
+const MIN_PASSWORD_LEN: usize = 8;
+
+/// Why `password` can't encrypt a key share, if it can't.
+fn password_problem(password: &str) -> Option<&'static str> {
+    if password.is_empty() {
+        Some("Enter a wallet password (it encrypts this device's key share)")
+    } else if password.chars().count() < MIN_PASSWORD_LEN {
+        Some("Wallet password must be at least 8 characters")
+    } else {
+        None
+    }
+}
+
 fn action<F>(fut: F) -> Task<Message>
 where
     F: std::future::Future<Output = Result<(), String>> + Send + 'static,
@@ -1711,6 +1818,10 @@ fn faint() -> Color {
     Color::from_rgb(0.80, 0.84, 0.88) // #CBD5E1
 }
 
+fn danger() -> Color {
+    Color::from_rgb(0.973, 0.443, 0.443) // #F87171
+}
+
 fn status_color(status: &str) -> Color {
     match status {
         "Ready" | "Running" => accent(),
@@ -1723,8 +1834,8 @@ fn status_color(status: &str) -> Color {
 #[cfg(test)]
 mod tests {
     use super::{
-        SessionInfo, SessionStatus, own_invite_id, signing_card_closable, signing_ready,
-        signing_wallet_id, split_signal_room,
+        SessionInfo, SessionStatus, own_invite_id, password_problem, signing_card_closable,
+        signing_ready, signing_wallet_id, split_signal_room,
     };
 
     #[test]
@@ -1759,6 +1870,21 @@ mod tests {
         assert!(signing_card_closable("complete"));
         assert!(!signing_card_closable("awaiting_approval"));
         assert!(!signing_card_closable("share"));
+    }
+
+    #[test]
+    fn empty_password_is_rejected() {
+        assert!(password_problem("").is_some());
+    }
+
+    #[test]
+    fn short_password_is_rejected() {
+        assert!(password_problem("1234567").is_some());
+    }
+
+    #[test]
+    fn eight_character_password_is_accepted() {
+        assert_eq!(password_problem("12345678"), None);
     }
 
     fn session(id: &str, initiator: &str) -> SessionInfo {
