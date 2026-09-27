@@ -2323,20 +2323,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "frost-secp256k1"
-version = "3.0.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d69a97ae720bc1f01efd7a87c6c8451582bd00a45383052b01e83ba9c6faa5c5"
-dependencies = [
- "document-features",
- "frost-core",
- "frost-rerandomized",
- "k256 0.13.4",
- "rand_core 0.6.4",
- "sha2 0.10.9",
-]
-
-[[package]]
 name = "frost-secp256k1-tr"
 version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2821,7 +2807,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.58.0",
 ]
 
 [[package]]
@@ -5398,15 +5384,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ripemd"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4dd4211456b4172d7e44261920c25acf07367c4f04bb5f5d54fc21b090d9b159"
-dependencies = [
- "digest 0.11.3",
-]
-
-[[package]]
 name = "rkyv"
 version = "0.8.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7371,7 +7348,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "starlab-client"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#dca7cf1753e6049973cdf8e53992ae51180eda22"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#ca4b28b930660df5c587de45fef8fb75c1cbe73f"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -7386,7 +7363,7 @@ dependencies = [
  "ethers-core",
  "frost-core",
  "frost-ed25519",
- "frost-secp256k1",
+ "frost-secp256k1-tr",
  "futures-util",
  "gethostname",
  "getrandom 0.4.2",
@@ -7416,7 +7393,7 @@ dependencies = [
 [[package]]
 name = "starlab-core"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#dca7cf1753e6049973cdf8e53992ae51180eda22"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#ca4b28b930660df5c587de45fef8fb75c1cbe73f"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -7425,7 +7402,6 @@ dependencies = [
  "bs58",
  "frost-core",
  "frost-ed25519",
- "frost-secp256k1",
  "frost-secp256k1-tr",
  "getrandom 0.4.2",
  "hex",
@@ -7436,7 +7412,6 @@ dependencies = [
  "pbkdf2 0.13.0",
  "rand_chacha 0.10.0",
  "rand_core 0.10.1",
- "ripemd",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -7452,7 +7427,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "frost-ed25519",
- "frost-secp256k1",
+ "frost-secp256k1-tr",
  "hex",
  "iced",
  "rfd",
@@ -7468,7 +7443,7 @@ dependencies = [
 [[package]]
 name = "starlab-signal-server"
 version = "0.1.1"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#dca7cf1753e6049973cdf8e53992ae51180eda22"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#ca4b28b930660df5c587de45fef8fb75c1cbe73f"
 dependencies = [
  "futures-util",
  "serde",
