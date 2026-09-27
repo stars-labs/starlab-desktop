@@ -96,6 +96,9 @@ where
     (tx, RunnerControl::Ed25519(app_state))
 }
 
+/// Late-bound signing observers fed from the runner's `on_sync`.
+type SigningSlot = Arc<std::sync::Mutex<Option<(SigningEventSink, Arc<SigningManager>)>>>;
+
 /// Core adapter that manages all the shared business logic
 pub struct CoreAdapter {
     pub state: Arc<CoreState>,
@@ -233,16 +236,18 @@ impl CoreAdapter {
         // pushes are spawned since on_sync itself is synchronous. Curve-agnostic
         // (operates on Model), so it's shared by both spawn fns below.
         let cb_for_sync = ui_callback.clone();
-        // Signing backend sink (#94): the backend is constructed AFTER spawn
-        // (it needs runner_tx), so on_sync reads it through a late-bound slot.
-        let sink_slot: Arc<std::sync::Mutex<Option<SigningEventSink>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let sink_for_sync = sink_slot.clone();
+        // Signing backend sink (#94) + the SigningManager: both are
+        // constructed AFTER spawn (they need runner_tx), so on_sync reads them
+        // through a late-bound slot. The sink resolves ceremonies; the manager
+        // turns a peer's signing announce into the approval prompt.
+        let signing_slot: SigningSlot = Arc::new(std::sync::Mutex::new(None));
+        let signing_for_sync = signing_slot.clone();
         let on_sync = move |model: &Model, msg: Option<&starlab_client::elm::Message>| {
             if let Some(m) = msg {
-                if let Ok(guard) = sink_for_sync.lock() {
-                    if let Some(sink) = guard.as_ref() {
+                if let Ok(guard) = signing_for_sync.lock() {
+                    if let Some((sink, manager)) = guard.as_ref() {
                         sink.observe(m);
+                        manager.observe(model, m);
                     }
                 }
             }
@@ -309,10 +314,11 @@ impl CoreAdapter {
                 // Real FROST signing (#94): SigningManager drives the SAME elm
                 // loop the TUI/CLI use, via the backend over runner_tx.
                 let (backend, sink) = ElmSigningBackend::new(runner_tx.clone());
-                *sink_slot.lock().unwrap() = Some(sink);
-                Arc::new(
+                let manager = Arc::new(
                     SigningManager::new(state.clone(), ui_callback.clone()).with_backend(backend),
-                )
+                );
+                *signing_slot.lock().unwrap() = Some((sink, manager.clone()));
+                manager
             },
             state,
             ui_callback,
@@ -355,7 +361,8 @@ impl CoreAdapter {
 
     /// User approved the pending signing request from the confirm
     /// modal. Runs the REAL FROST ceremony (commitment / share / aggregate
-    /// over the mesh) via the SigningBackend (#94). The share password is
+    /// over the mesh) via the SigningBackend (#94): a request this device made
+    /// announces a new ceremony; a peer's request joins that peer's session. The share password is
     /// the one the user set for this device's keystore (same field the DKG
     /// flow uses); it goes to the backend and is never stored beyond that.
     pub async fn approve_signing(&self, request_id: String) -> Result<(), String> {
@@ -370,7 +377,8 @@ impl CoreAdapter {
             .map_err(|e| e.to_string())
     }
 
-    /// User rejected the pending signing request.
+    /// User rejected the pending signing request (a peer's request is
+    /// declined in the engine, dropping its session invite).
     pub async fn reject_signing(&self, request_id: String) -> Result<(), String> {
         self.signing_manager
             .reject(&request_id)
@@ -820,6 +828,118 @@ mod tests {
 
         tx.send(Message::CancelDKG).unwrap();
         wait_for(&mut open, false).await;
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    /// A real adapter (unreachable signal server) for device `me` holding
+    /// wallet `w1`, plus the receiving end of its UI channel.
+    fn adapter_holding_w1() -> (
+        CoreAdapter,
+        tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+        std::path::PathBuf,
+    ) {
+        let keystore = std::env::temp_dir().join(format!("starlab-test-{}", uuid::Uuid::new_v4()));
+        let (ui_tx, ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        let adapter = CoreAdapter::new(
+            ui_tx,
+            "me".to_string(),
+            keystore.to_string_lossy().into_owned(),
+            "ws://127.0.0.1:9".to_string(),
+            "secp256k1".to_string(),
+        );
+        let wallet = serde_json::from_value(serde_json::json!({
+            "session_id": "w1",
+            "device_id": "me",
+            "curve_type": "secp256k1",
+            "threshold": 2,
+            "total_participants": 3,
+            "participant_index": 2,
+            "group_public_key": "",
+            "created_at": "",
+            "last_modified": "",
+        }))
+        .unwrap();
+        adapter
+            .runner_tx
+            .send(Message::WalletsLoaded {
+                wallets: vec![wallet],
+            })
+            .unwrap();
+        (adapter, ui_rx, keystore)
+    }
+
+    fn peer_signing_announce() -> Message {
+        Message::SessionDiscovered {
+            session: SignalSession {
+                session_id: "sign-1".to_string(),
+                proposer_id: "peer".to_string(),
+                total: 3,
+                threshold: 2,
+                participants: vec!["peer".to_string(), "me".to_string()],
+                session_type: SessionType::Signing {
+                    wallet_name: "w1-ethereum-0".to_string(),
+                    curve_type: "secp256k1".to_string(),
+                    blockchain: "ethereum".to_string(),
+                    group_public_key: String::new(),
+                },
+                curve_type: "secp256k1".to_string(),
+                coordination_type: "network".to_string(),
+                signing_message_hex: Some("deadbeef".to_string()),
+            },
+        }
+    }
+
+    /// Next `UiEvent::SigningRequest` pushed to the UI (skipping the
+    /// per-message state mirrors).
+    async fn next_signing_request(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+    ) -> Option<starlab_client::core::SigningRequest> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match rx.recv().await.expect("ui channel closed") {
+                    UiEvent::SigningRequest(req) => return req,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("no SigningRequest event pushed")
+    }
+
+    #[tokio::test]
+    async fn peer_signing_session_opens_the_approval_prompt() {
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1();
+        adapter.runner_tx.send(peer_signing_announce()).unwrap();
+
+        let req = next_signing_request(&mut ui_rx)
+            .await
+            .expect("a peer's signing session must open the prompt");
+        assert_eq!(req.session_id.as_deref(), Some("sign-1"));
+        assert_eq!(req.message_hex, "deadbeef");
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_peer_request_closes_the_prompt_and_drops_the_invite() {
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1();
+        adapter.runner_tx.send(peer_signing_announce()).unwrap();
+        let req = next_signing_request(&mut ui_rx).await.unwrap();
+
+        adapter.reject_signing(req.id).await.unwrap();
+        assert!(next_signing_request(&mut ui_rx).await.is_none());
+
+        // The engine's decline path removes the invite from the session list.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let UiEvent::AvailableSessions(sessions) = ui_rx.recv().await.unwrap()
+                    && sessions.iter().all(|s| s.session_id != "sign-1")
+                {
+                    return;
+                }
+            }
+        })
+        .await
+        .expect("declined session never left the session list");
         let _ = std::fs::remove_dir_all(keystore);
     }
 }

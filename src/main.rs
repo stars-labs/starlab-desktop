@@ -166,6 +166,9 @@ pub struct State {
     signing_message_preview: String,
     signing_chain: String,
     signing_label: String,
+    /// The pending request came from another device (approve = join its
+    /// ceremony) rather than from this device's own "Sign" action.
+    signing_from_peer: bool,
     signing_state: String,
     last_signature: String,
 
@@ -250,6 +253,7 @@ impl State {
             signing_message_preview: String::new(),
             signing_chain: String::new(),
             signing_label: String::new(),
+            signing_from_peer: false,
             signing_state: "idle".to_string(),
             last_signature: String::new(),
             device_id,
@@ -478,7 +482,13 @@ impl State {
             Message::ApproveSigning => {
                 let adapter = self.adapter.clone();
                 let id = self.signing_request_id.clone();
-                action(async move { adapter.approve_signing(id).await })
+                // The prompt carries its own password field: a co-signer
+                // answering a peer's request may not have typed it anywhere.
+                let pw = self.dkg_password.clone();
+                action(async move {
+                    adapter.set_dkg_password(pw);
+                    adapter.approve_signing(id).await
+                })
             }
             Message::RejectSigning => {
                 let adapter = self.adapter.clone();
@@ -615,6 +625,7 @@ impl State {
                     };
                     self.signing_chain = r.chain;
                     self.signing_label = r.display_label.unwrap_or_default();
+                    self.signing_from_peer = r.session_id.is_some();
                 }
                 None => {
                     self.has_signing_request = false;
@@ -622,6 +633,7 @@ impl State {
                     self.signing_message_preview.clear();
                     self.signing_chain.clear();
                     self.signing_label.clear();
+                    self.signing_from_peer = false;
                 }
             },
             UiEvent::SigningState(state) => {
@@ -1307,8 +1319,14 @@ impl State {
             "Signing…"
         };
 
+        let title = if self.signing_from_peer {
+            "Co-signer approval requested"
+        } else {
+            "Confirm signing request"
+        };
+
         card(
-            "Confirm signing request",
+            title,
             column![
                 label,
                 text(format!("Chain: {}", self.signing_chain))
@@ -1319,6 +1337,9 @@ impl State {
                 text(format!("Phase: {}", self.signing_state))
                     .size(11)
                     .color(faint()),
+                text_input("Wallet password", &self.dkg_password)
+                    .secure(true)
+                    .on_input(Message::KeystorePasswordChanged),
                 row![
                     button(text("Reject"))
                         .style(button::danger)
