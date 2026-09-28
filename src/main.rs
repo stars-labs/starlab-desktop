@@ -54,12 +54,6 @@ pub enum Tab {
     Activity,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetupMode {
-    Create,
-    Join,
-}
-
 /// An action whose async call is still in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingAction {
@@ -95,7 +89,6 @@ pub enum Message {
     ExportShare,
 
     // Wallet setup
-    SetupModeSelected(SetupMode),
     WalletNameChanged(String),
     InviteIdChanged(String),
     CreateWallet,
@@ -201,7 +194,6 @@ pub struct State {
 
     // UI
     active_tab: Tab,
-    setup_mode: SetupMode,
     wallet_name: String,
     invite_id: String,
     pending_action: Option<PendingAction>,
@@ -261,7 +253,6 @@ impl State {
             signing_state: SigningState::Idle,
             last_signature: String::new(),
             active_tab: Tab::Setup,
-            setup_mode: SetupMode::Create,
             wallet_name: String::new(),
             invite_id: String::new(),
             pending_action: None,
@@ -375,10 +366,6 @@ impl State {
                 action(async move { adapter.export_share(wallet_id, curve, password).await })
             }
 
-            Message::SetupModeSelected(mode) => {
-                self.setup_mode = mode;
-                Task::none()
-            }
             Message::WalletNameChanged(v) => {
                 self.wallet_name = v;
                 Task::none()
@@ -388,7 +375,7 @@ impl State {
                 Task::none()
             }
             Message::CreateWallet => {
-                if self.setup_blocker().is_some() {
+                if self.create_blocker().is_some() {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
@@ -398,7 +385,7 @@ impl State {
                 action(async move { adapter.create_wallet(name, password).await })
             }
             Message::JoinWallet => {
-                if self.setup_blocker().is_some() {
+                if self.join_blocker().is_some() {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
@@ -585,19 +572,27 @@ impl State {
         own_invite(&self.device_id, self.active_session.as_ref())
     }
 
-    /// Why Create/Join is disabled, if it is.
-    fn setup_blocker(&self) -> Option<&'static str> {
+    /// Why "Create wallet" is disabled, if it is.
+    fn create_blocker(&self) -> Option<&'static str> {
         if !self.connected {
             Some("Connect to the network first.")
         } else if let Some(problem) = password_problem(&self.password) {
             Some(problem)
         } else if self.wallet_busy() {
             Some("A wallet setup is already in progress.")
-        } else if self.setup_mode == SetupMode::Join && self.invite_id.trim().is_empty() {
-            Some("Pick an invite or paste its ID.")
         } else {
             None
         }
+    }
+
+    /// Why "Join wallet" is disabled, if it is.
+    fn join_blocker(&self) -> Option<&'static str> {
+        self.create_blocker().or_else(|| {
+            self.invite_id
+                .trim()
+                .is_empty()
+                .then_some("Pick an invite or paste its ID.")
+        })
     }
 
     /// Why "Import key share…" is disabled, if it is.
@@ -1101,24 +1096,12 @@ impl State {
         )
     }
 
+    /// Create and Join side by side: each section has exactly one action.
     fn setup_tab(&self) -> Element<'_, Message> {
-        let modes = row![
-            segment_button(
-                "Create a new wallet",
-                Message::SetupModeSelected(SetupMode::Create),
-                self.setup_mode == SetupMode::Create,
-            ),
-            segment_button(
-                "Join with an invite",
-                Message::SetupModeSelected(SetupMode::Join),
-                self.setup_mode == SetupMode::Join,
-            ),
-        ]
-        .spacing(8);
-        let blocker = self.setup_blocker();
-
-        let body: Element<'_, Message> = match self.setup_mode {
-            SetupMode::Create => column![
+        let create_blocker = self.create_blocker();
+        let create = card(
+            "Create a new wallet",
+            column![
                 text(format!(
                     "Start a {DEFAULT_THRESHOLD}-of-{DEFAULT_TOTAL} wallet on this device, then share \
                      its invite ID with {} other devices. Any {DEFAULT_THRESHOLD} of the \
@@ -1135,68 +1118,68 @@ impl State {
                 action_row(
                     action_button("Create wallet")
                         .style(button::primary)
-                        .on_press_maybe(blocker.is_none().then_some(Message::CreateWallet)),
-                    blocker,
+                        .on_press_maybe(create_blocker.is_none().then_some(Message::CreateWallet)),
+                    create_blocker,
                 ),
             ]
             .spacing(12)
             .into(),
-            SetupMode::Join => {
-                let mut invites = Column::new().spacing(6);
-                let wallet_invites = wallet_invites(&self.device_id, &self.invites);
-                if wallet_invites.is_empty() {
-                    invites = invites.push(hint("No invites in this room yet."));
-                }
-                for invite in wallet_invites {
-                    invites = invites.push(
-                        button(
-                            column![
-                                text(&invite.id).size(13),
-                                text(format!(
-                                    "from {} · {} of {} joined",
-                                    invite.proposer,
-                                    invite.participants.len(),
-                                    invite.total
-                                ))
-                                .size(11),
-                            ]
-                            .spacing(2),
-                        )
-                        .width(Length::Fill)
-                        .style(if invite.id == self.invite_id.trim() {
-                            button::primary
-                        } else {
-                            button::secondary
-                        })
-                        .on_press(Message::InviteIdChanged(invite.id.clone())),
-                    );
-                }
-                column![
-                    text("Join a wallet another device started: pick its invite, or paste the invite ID.")
-                        .size(13)
-                        .color(muted()),
-                    field("Invites in this room", invites),
-                    field(
-                        "Invite ID",
-                        text_input("Paste invite ID", &self.invite_id)
-                            .on_input(Message::InviteIdChanged),
-                    ),
-                    action_row(
-                        action_button("Join wallet")
-                            .style(button::primary)
-                            .on_press_maybe(blocker.is_none().then_some(Message::JoinWallet)),
-                        blocker,
-                    ),
-                ]
-                .spacing(12)
-                .into()
-            }
-        };
+        );
 
-        card(
-            "Set up a shared wallet",
-            column![modes, body].spacing(16).into(),
-        )
+        let mut invites = Column::new().spacing(6);
+        let wallet_invites = wallet_invites(&self.device_id, &self.invites);
+        if wallet_invites.is_empty() {
+            invites = invites.push(hint("No invites in this room yet."));
+        }
+        for invite in wallet_invites {
+            invites = invites.push(
+                button(
+                    column![
+                        text(&invite.id).size(13),
+                        text(format!(
+                            "from {} · {} of {} joined",
+                            invite.proposer,
+                            invite.participants.len(),
+                            invite.total
+                        ))
+                        .size(11),
+                    ]
+                    .spacing(2),
+                )
+                .width(Length::Fill)
+                .style(if invite.id == self.invite_id.trim() {
+                    button::primary
+                } else {
+                    button::secondary
+                })
+                .on_press(Message::InviteIdChanged(invite.id.clone())),
+            );
+        }
+        let join_blocker = self.join_blocker();
+        let join = card(
+            "Join a wallet",
+            column![
+                text("Another device started it: pick its invite, or paste the invite ID.")
+                    .size(13)
+                    .color(muted()),
+                field("Invites in this room", invites),
+                field(
+                    "Invite ID",
+                    text_input("Paste invite ID", &self.invite_id)
+                        .on_input(Message::InviteIdChanged),
+                ),
+                action_row(
+                    action_button("Join wallet")
+                        .style(button::primary)
+                        .on_press_maybe(join_blocker.is_none().then_some(Message::JoinWallet)),
+                    join_blocker,
+                ),
+            ]
+            .spacing(12)
+            .into(),
+        );
+
+        row![create, join].spacing(14).into()
     }
 
     fn sign_tab(&self) -> Element<'_, Message> {
@@ -1755,6 +1738,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn setup_has_one_action_per_section() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        connected(&mut state);
+        state.password = "password1".to_string();
+        // Section titles are headings, not a second set of buttons.
+        assert!(clicked(&state, "Create a new wallet").is_empty());
+        assert!(clicked(&state, "Join a wallet").is_empty());
+        assert!(clicked(&state, "Join wallet").is_empty());
+        state.invite_id = "7d2e0c4b".to_string();
+        assert!(matches!(
+            clicked(&state, "Join wallet").as_slice(),
+            [Message::JoinWallet]
+        ));
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
     async fn export_needs_a_wallet_and_an_8_character_password() {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
@@ -1834,7 +1835,6 @@ mod tests {
         state.wallet_name = "Treasury".to_string();
         shot(&state, "2-create");
 
-        state.setup_mode = SetupMode::Join;
         state.invites = vec![
             invite(
                 "7d2e0c4b-1a9f-4c3e-b8d5-62f0a1e9c7b4",
@@ -1850,7 +1850,6 @@ mod tests {
         state.invite_id = "7d2e0c4b-1a9f-4c3e-b8d5-62f0a1e9c7b4".to_string();
         shot(&state, "3-join");
 
-        state.setup_mode = SetupMode::Create;
         state.invites.clear();
         state.ceremony_open = true;
         state.active_session = Some(invite(
