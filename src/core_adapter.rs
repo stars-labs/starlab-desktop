@@ -9,6 +9,7 @@ use starlab_client::core::{
     CoreState, UICallback,
     signing_backend::{ElmSigningBackend, SigningEventSink},
     signing_manager::SigningManager,
+    wallet_manager::WalletManager,
 };
 use starlab_client::elm::headless::HeadlessRunner;
 use starlab_client::elm::model::{WalletConfig, WalletMode};
@@ -23,6 +24,54 @@ use crate::ui_callback::{Invite, NativeUICallback, UiEvent};
 /// users know how many devices to bring.
 pub const DEFAULT_TOTAL: u16 = 3;
 pub const DEFAULT_THRESHOLD: u16 = 2;
+
+/// Env overrides that skip the native file dialogs (headless / Xvfb runs have
+/// no desktop file portal, so the dialog would never open).
+const IMPORT_PATH_ENV: &str = "MPC_IMPORT_PATH";
+const EXPORT_PATH_ENV: &str = "MPC_EXPORT_PATH";
+
+/// A dialog that has not answered by then is treated as unable to open.
+const DIALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+
+fn env_path(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|p| !p.trim().is_empty())
+}
+
+/// The file path to use: `override_path` when set (from `env_var`), else the
+/// native `dialog`'s answer. `Ok(None)` means the user cancelled; a dialog
+/// that fails or never opens is an error naming the override.
+async fn pick_path<F>(
+    override_path: Option<String>,
+    env_var: &str,
+    dialog: F,
+) -> Result<Option<String>, String>
+where
+    F: FnOnce() -> Option<std::path::PathBuf> + Send + 'static,
+{
+    if let Some(path) = override_path {
+        return Ok(Some(path));
+    }
+    match tokio::time::timeout(DIALOG_TIMEOUT, tokio::task::spawn_blocking(dialog)).await {
+        Ok(Ok(path)) => Ok(path.map(|p| p.to_string_lossy().into_owned())),
+        Ok(Err(e)) => Err(format!(
+            "The file dialog failed ({e}). Set {env_var} to a file path instead."
+        )),
+        Err(_) => Err(format!(
+            "The file dialog did not open (no desktop file portal?). Set {env_var} to a file \
+             path instead."
+        )),
+    }
+}
+
+/// Peers whose WebRTC data channel to this device is open.
+fn connected_peers(model: &Model) -> usize {
+    model
+        .network_state
+        .participant_webrtc_status
+        .values()
+        .filter(|(_, channel)| *channel)
+        .count()
+}
 
 enum RunnerControl {
     Secp256k1(Arc<Mutex<AppState<frost_secp256k1_tr::Secp256K1Sha256TR>>>),
@@ -156,6 +205,8 @@ type SigningSlot = Arc<std::sync::Mutex<Option<(SigningEventSink, Arc<SigningMan
 
 pub struct CoreAdapter {
     signing_manager: Arc<SigningManager>,
+    /// Key-share import/export on the same on-disk keystore the runner uses.
+    wallet_manager: Arc<WalletManager>,
     runner_tx: UnboundedSender<Message>,
     /// Mutable runner configuration that `TriggerReconnect` reads.
     runner_control: RunnerControl,
@@ -203,6 +254,7 @@ impl CoreAdapter {
             };
             let events = [
                 UiEvent::Connected(model.network_state.connected),
+                UiEvent::Peers(connected_peers(model)),
                 UiEvent::Wallets(rich_wallets(model)),
                 UiEvent::Invites(model.session_invites.iter().filter_map(invite).collect()),
                 UiEvent::ActiveSession(model.active_session.as_ref().and_then(invite)),
@@ -217,6 +269,11 @@ impl CoreAdapter {
                 let _ = ui_tx.send(event);
             }
         };
+        let state = Arc::new(CoreState::new());
+        let wallet_manager = Arc::new(
+            WalletManager::new(state.clone(), ui_callback.clone())
+                .with_keystore(keystore_path.clone(), device_id.clone()),
+        );
         let (runner_tx, runner_control) = if curve == "ed25519" {
             spawn_ed25519_runner(device_id, keystore_path, signal_url, on_sync)
         } else {
@@ -230,13 +287,13 @@ impl CoreAdapter {
         }
 
         let (backend, sink) = ElmSigningBackend::new(runner_tx.clone());
-        let signing_manager = Arc::new(
-            SigningManager::new(Arc::new(CoreState::new()), ui_callback).with_backend(backend),
-        );
+        let signing_manager =
+            Arc::new(SigningManager::new(state, ui_callback).with_backend(backend));
         *signing_slot.lock().unwrap() = Some((sink, signing_manager.clone()));
 
         Self {
             signing_manager,
+            wallet_manager,
             runner_tx,
             runner_control,
         }
@@ -287,6 +344,71 @@ impl CoreAdapter {
                 password,
                 label: String::new(),
             })
+            .map_err(|e| e.to_string())
+    }
+
+    /// Import an exported key-share file (encrypted with `password`) into this
+    /// device's keystore; the runner then re-reads the keystore so the wallet
+    /// shows up. The file comes from `MPC_IMPORT_PATH` when set, else from a
+    /// native file picker. A cancelled picker is not an error.
+    pub async fn import_share(&self, password: String) -> Result<(), String> {
+        let Some(path) = pick_path(env_path(IMPORT_PATH_ENV), IMPORT_PATH_ENV, || {
+            rfd::FileDialog::new()
+                .add_filter("Starlab key share", &["json"])
+                .set_title("Import wallet key share")
+                .pick_file()
+        })
+        .await?
+        else {
+            return Ok(());
+        };
+        self.import_share_file(path, password).await
+    }
+
+    async fn import_share_file(&self, path: String, password: String) -> Result<(), String> {
+        self.wallet_manager
+            .import_wallet(path, password)
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = self.runner_tx.send(Message::ListWallets);
+        Ok(())
+    }
+
+    /// Export this device's key share of `wallet_id` on `curve`, still
+    /// encrypted with the wallet `password`. The target comes from
+    /// `MPC_EXPORT_PATH` when set, else from a native save dialog.
+    pub async fn export_share(
+        &self,
+        wallet_id: String,
+        curve: String,
+        password: String,
+    ) -> Result<(), String> {
+        let file_name = format!("{wallet_id}-{curve}.json");
+        let Some(path) = pick_path(env_path(EXPORT_PATH_ENV), EXPORT_PATH_ENV, move || {
+            rfd::FileDialog::new()
+                .add_filter("Starlab key share", &["json"])
+                .set_title("Export wallet key share")
+                .set_file_name(file_name)
+                .save_file()
+        })
+        .await?
+        else {
+            return Ok(());
+        };
+        self.export_share_file(&wallet_id, &curve, path, password)
+            .await
+    }
+
+    async fn export_share_file(
+        &self,
+        wallet_id: &str,
+        curve: &str,
+        path: String,
+        password: String,
+    ) -> Result<(), String> {
+        self.wallet_manager
+            .export_wallet(wallet_id, curve, path, password)
+            .await
             .map_err(|e| e.to_string())
     }
 
@@ -398,9 +520,9 @@ mod tests {
     }
 
     /// Three desktop adapters on one in-process signal server: create a
-    /// 2-of-3 wallet, then sign with an account wallet from one device while
-    /// another approves the request — the exact path the Sign tab and the
-    /// Signature requests card drive.
+    /// 2-of-3 wallet, sign with an account wallet from one device while
+    /// another approves the request (the Sign tab and Signature request card
+    /// paths), then export a share and import it into a fresh install.
     #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
     #[ignore = "real DKG + signing over loopback WebRTC; run with --ignored"]
     async fn three_devices_create_a_wallet_and_sign() {
@@ -493,6 +615,43 @@ mod tests {
         .await;
         assert!(!signature.is_empty());
 
+        // Device 1 exports its share; a fresh install (same device id, empty
+        // keystore) imports it and lists the wallet.
+        let (exporter, _, _, exporter_password) = &devices[0];
+        let share =
+            std::env::temp_dir().join(format!("starlab-share-{}.json", uuid::Uuid::new_v4()));
+        let share_path = share.to_string_lossy().into_owned();
+        exporter
+            .export_share_file(
+                &wallet_id,
+                "secp256k1",
+                share_path.clone(),
+                exporter_password.clone(),
+            )
+            .await
+            .expect("export");
+        let restored_keystore =
+            std::env::temp_dir().join(format!("starlab-e2e-{}", uuid::Uuid::new_v4()));
+        let (tx, mut restored_rx) = tokio::sync::mpsc::unbounded_channel();
+        let restored = CoreAdapter::new(
+            tx,
+            "device-1".to_string(),
+            restored_keystore.to_string_lossy().into_owned(),
+            url.clone(),
+            "secp256k1".to_string(),
+        );
+        restored
+            .import_share_file(share_path, exporter_password.clone())
+            .await
+            .expect("import");
+        next_match(&mut restored_rx, "imported wallet", |e| match e {
+            UiEvent::Wallets(wallets) => wallets.iter().any(|w| w.id == wallet_id).then_some(()),
+            _ => None,
+        })
+        .await;
+        let _ = std::fs::remove_file(share);
+        let _ = std::fs::remove_dir_all(restored_keystore);
+
         let _ = std::fs::remove_dir_all(signer_keystore);
         for (_, _, keystore, _) in devices {
             let _ = std::fs::remove_dir_all(keystore);
@@ -511,6 +670,40 @@ mod tests {
             coordination_type: "online".to_string(),
             signing_message_hex: message.map(str::to_string),
         }
+    }
+
+    #[tokio::test]
+    async fn path_override_skips_the_dialog() {
+        let path = pick_path(Some("/tmp/share.json".into()), IMPORT_PATH_ENV, || {
+            panic!("dialog must not open when the override is set")
+        })
+        .await
+        .unwrap();
+        assert_eq!(path.as_deref(), Some("/tmp/share.json"));
+    }
+
+    #[tokio::test]
+    async fn cancelled_dialog_is_not_an_error() {
+        let path = pick_path(None, IMPORT_PATH_ENV, || None).await.unwrap();
+        assert_eq!(path, None);
+    }
+
+    #[tokio::test]
+    async fn failing_dialog_names_the_override() {
+        let err = pick_path(None, EXPORT_PATH_ENV, || panic!("no portal"))
+            .await
+            .unwrap_err();
+        assert!(err.contains(EXPORT_PATH_ENV), "{err}");
+    }
+
+    #[test]
+    fn only_open_data_channels_count_as_connected_peers() {
+        let mut model = Model::new("me".into());
+        let status = &mut model.network_state.participant_webrtc_status;
+        status.insert("a".into(), (true, true));
+        status.insert("b".into(), (true, false));
+        status.insert("gone".into(), (false, false));
+        assert_eq!(connected_peers(&model), 1);
     }
 
     #[test]

@@ -63,6 +63,8 @@ pub enum SetupMode {
 /// An action whose async call is still in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingAction {
+    ImportShare,
+    ExportShare,
     CreateWallet,
     JoinWallet,
     CoSign,
@@ -89,6 +91,8 @@ pub enum Message {
     /// Reveal one more account in the picker (the `+` button).
     AddAccount,
     PasswordChanged(String),
+    ImportShare,
+    ExportShare,
 
     // Wallet setup
     SetupModeSelected(SetupMode),
@@ -161,6 +165,8 @@ pub struct State {
     server_url: String,
     room: String,
     connected: bool,
+    /// Peers with an open WebRTC data channel to this device.
+    peers: usize,
     /// URL of the last connect request. When the fields no longer match it,
     /// the network card offers a reconnect.
     connected_url: Option<String>,
@@ -236,6 +242,7 @@ impl State {
             server_url: config.server_url,
             room: config.room,
             connected: false,
+            peers: 0,
             connected_url: None,
             wallets: Vec::new(),
             active_wallet_index: 0,
@@ -343,6 +350,29 @@ impl State {
             Message::PasswordChanged(v) => {
                 self.password = v;
                 Task::none()
+            }
+            Message::ImportShare => {
+                if self.import_blocker().is_some() {
+                    return Task::none();
+                }
+                let adapter = self.adapter.clone();
+                let password = self.password.clone();
+                self.pending_action = Some(PendingAction::ImportShare);
+                self.set_status("Importing a key share");
+                action(async move { adapter.import_share(password).await })
+            }
+            Message::ExportShare => {
+                let Some((wallet_id, curve)) = self.export_target() else {
+                    return Task::none();
+                };
+                if self.export_blocker().is_some() {
+                    return Task::none();
+                }
+                let adapter = self.adapter.clone();
+                let password = self.password.clone();
+                self.pending_action = Some(PendingAction::ExportShare);
+                self.set_status("Exporting the key share");
+                action(async move { adapter.export_share(wallet_id, curve, password).await })
             }
 
             Message::SetupModeSelected(mode) => {
@@ -463,6 +493,7 @@ impl State {
                 }
                 self.connected = connected;
             }
+            UiEvent::Peers(peers) => self.peers = peers,
             UiEvent::Wallets(wallets) => {
                 // A new wallet (startup load or a finished setup) → go sign.
                 if wallets.len() > self.wallets.len() && self.active_tab == Tab::Setup {
@@ -558,8 +589,8 @@ impl State {
     fn setup_blocker(&self) -> Option<&'static str> {
         if !self.connected {
             Some("Connect to the network first.")
-        } else if self.password.is_empty() {
-            Some("Set a wallet password first (left panel).")
+        } else if let Some(problem) = password_problem(&self.password) {
+            Some(problem)
         } else if self.wallet_busy() {
             Some("A wallet setup is already in progress.")
         } else if self.setup_mode == SetupMode::Join && self.invite_id.trim().is_empty() {
@@ -567,6 +598,40 @@ impl State {
         } else {
             None
         }
+    }
+
+    /// Why "Import key share…" is disabled, if it is.
+    fn import_blocker(&self) -> Option<&'static str> {
+        if self.pending_action.is_some() {
+            Some("Another action is in progress.")
+        } else if self.password.is_empty() {
+            Some("Enter the password the key share was exported with.")
+        } else {
+            None
+        }
+    }
+
+    /// Why "Export key share…" is disabled, if it is.
+    fn export_blocker(&self) -> Option<&'static str> {
+        if self.export_target().is_none() {
+            Some("Select a wallet to export.")
+        } else if self.pending_action.is_some() {
+            Some("Another action is in progress.")
+        } else {
+            password_problem(&self.password)
+        }
+    }
+
+    /// `(wallet id, curve)` of the share "Export key share…" writes: the
+    /// selected wallet's key on this device's curve, else its first key.
+    fn export_target(&self) -> Option<(String, String)> {
+        let wallet = self.active_wallet()?;
+        let (curve, _) = wallet
+            .keys
+            .iter()
+            .find(|(curve, _)| curve == self.signing_curve)
+            .or_else(|| wallet.keys.first())?;
+        Some((wallet.id.clone(), curve.clone()))
     }
 
     /// Why "Request signature" is disabled, if it is.
@@ -676,11 +741,16 @@ impl State {
 
     fn header(&self) -> Element<'_, Message> {
         let (dot, label, color) = if self.connected {
-            ("●", "Connected", accent())
+            let label = match self.peers {
+                0 => "Connected".to_string(),
+                1 => "Connected · 1 peer".to_string(),
+                n => format!("Connected · {n} peers"),
+            };
+            ("●", label, accent())
         } else if self.connected_url.is_some() {
-            ("◌", "Connecting…", warning())
+            ("◌", "Connecting…".to_string(), warning())
         } else {
-            ("○", "Offline", muted())
+            ("○", "Offline".to_string(), muted())
         };
         row![
             column![
@@ -832,8 +902,36 @@ impl State {
                 .on_input(Message::PasswordChanged),
         ));
         body = body.push(hint(
-            "Encrypts this device's key shares. Needed to create, join and sign.",
+            "Encrypts this device's key shares (at least 8 characters). Needed to create, \
+             join and sign.",
         ));
+        let backup = if self.wallets.is_empty() {
+            self.import_blocker()
+        } else {
+            self.export_blocker().or(self.import_blocker())
+        };
+        body = body.push(section_divider()).push(
+            row![
+                action_button("Import key share…").on_press_maybe(
+                    self.import_blocker()
+                        .is_none()
+                        .then_some(Message::ImportShare)
+                ),
+                action_button("Export key share…").on_press_maybe(
+                    self.export_blocker()
+                        .is_none()
+                        .then_some(Message::ExportShare)
+                ),
+            ]
+            .spacing(8),
+        );
+        body = body.push(match backup {
+            Some(reason) => text(reason).size(12).color(warning()).into(),
+            None => hint(
+                "Export saves this device's encrypted key share of the selected wallet; \
+                 import restores one.",
+            ),
+        });
 
         card("Wallets", body.into())
     }
@@ -1223,6 +1321,19 @@ fn wallet_invites<'a>(device_id: &str, invites: &'a [Invite]) -> Vec<&'a Invite>
     invites.iter().filter(|i| i.proposer != device_id).collect()
 }
 
+const MIN_PASSWORD_LEN: usize = 8;
+
+/// Why `password` can't encrypt a key share, if it can't.
+fn password_problem(password: &str) -> Option<&'static str> {
+    if password.is_empty() {
+        Some("Set a wallet password first (left panel).")
+    } else if password.chars().count() < MIN_PASSWORD_LEN {
+        Some("The wallet password must be at least 8 characters.")
+    } else {
+        None
+    }
+}
+
 fn signing_phase(state: &SigningState) -> &'static str {
     match state {
         SigningState::Aggregating => "Combining signatures…",
@@ -1603,7 +1714,14 @@ mod tests {
 
         connected(&mut state);
         assert!(clicked(&state, "Create wallet").is_empty());
-        state.password = "pw".to_string();
+        state.password = "short".to_string();
+        assert!(
+            simulator(state.view())
+                .find("The wallet password must be at least 8 characters.")
+                .is_ok()
+        );
+        assert!(clicked(&state, "Create wallet").is_empty());
+        state.password = "password1".to_string();
         assert!(matches!(
             clicked(&state, "Create wallet").as_slice(),
             [Message::CreateWallet]
@@ -1634,6 +1752,42 @@ mod tests {
             [Message::RejectSignatureRequest(id)] if id == "req-1"
         ));
         let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn export_needs_a_wallet_and_an_8_character_password() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        state.password = "password1".to_string();
+        assert!(clicked(&state, "Export key share…").is_empty());
+        with_wallet(&mut state);
+        state.password = "short".to_string();
+        assert!(clicked(&state, "Export key share…").is_empty());
+        state.password = "password1".to_string();
+        assert!(matches!(
+            clicked(&state, "Export key share…").as_slice(),
+            [Message::ExportShare]
+        ));
+        assert_eq!(
+            state.export_target(),
+            Some(("9c1f4e2ab37d".to_string(), "secp256k1".to_string()))
+        );
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[test]
+    fn empty_password_is_rejected() {
+        assert!(password_problem("").is_some());
+    }
+
+    #[test]
+    fn short_password_is_rejected() {
+        assert!(password_problem("1234567").is_some());
+    }
+
+    #[test]
+    fn eight_character_password_is_accepted() {
+        assert_eq!(password_problem("12345678"), None);
     }
 
     #[tokio::test]
@@ -1676,7 +1830,7 @@ mod tests {
         shot(&state, "1-offline");
 
         connected(&mut state);
-        state.password = "pw".to_string();
+        state.password = "password1".to_string();
         state.wallet_name = "Treasury".to_string();
         shot(&state, "2-create");
 

@@ -46,12 +46,14 @@ view(&State)->Element<Message>  <->  update(&mut State, Message)  <->  core_adap
 
 Every flow runs on the real engine: connect, create or join a 2-of-3 wallet
 (DKG), cancel a setup (withdraws the invite), sign with any account and chain,
-and co-sign a peer's request. Keystore import/export and the SD-card air-gap
-are not exposed — the engine's desktop-side managers for them are placeholders.
+approve or reject a peer's signature request, and export / import this
+device's encrypted key share (`MPC_EXPORT_PATH` / `MPC_IMPORT_PATH` skip the
+file dialog on machines without a desktop file portal). The SD-card air-gap
+is not exposed.
 
 ```bash
 cargo test                             # unit + headless UI tests (iced_test)
-cargo test -- --ignored                # 3 devices: create a wallet, then sign (loopback)
+cargo test -- --ignored                # 3 devices: create, sign, export/import (loopback)
 SNAPSHOT_DIR=/tmp/shots cargo test snapshots   # render the main screens to PNG
 ```
 
