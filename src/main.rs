@@ -6,7 +6,7 @@
 //! into [`Message::Ui`].
 //!
 //! Layout: the left column holds what the other screens depend on — the
-//! network (server + room) and the wallets (plus the wallet password). The
+//! network (server + room) and the wallets (plus key-share backup). The
 //! main area follows the user's flow: set up a wallet, sign with it, and an
 //! activity log. Anything that needs attention right now (a running wallet
 //! setup, a peer's signature request) is pinned above the tabs.
@@ -54,6 +54,44 @@ pub enum Tab {
     Activity,
 }
 
+/// Every password field sits next to the action that needs it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasswordField {
+    /// New password for the share a created wallet produces (+ confirmation).
+    Create,
+    CreateConfirm,
+    /// New password for the share a joined wallet produces (+ confirmation).
+    Join,
+    JoinConfirm,
+    /// Unlocks this device's share to sign or co-sign.
+    Unlock,
+    /// Encrypts an exported share / decrypts an imported one.
+    Backup,
+}
+
+#[derive(Debug, Clone, Default)]
+struct Passwords {
+    create: String,
+    create_confirm: String,
+    join: String,
+    join_confirm: String,
+    unlock: String,
+    backup: String,
+}
+
+impl Passwords {
+    fn get_mut(&mut self, field: PasswordField) -> &mut String {
+        match field {
+            PasswordField::Create => &mut self.create,
+            PasswordField::CreateConfirm => &mut self.create_confirm,
+            PasswordField::Join => &mut self.join,
+            PasswordField::JoinConfirm => &mut self.join_confirm,
+            PasswordField::Unlock => &mut self.unlock,
+            PasswordField::Backup => &mut self.backup,
+        }
+    }
+}
+
 /// An action whose async call is still in flight.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingAction {
@@ -84,7 +122,7 @@ pub enum Message {
     SelectAccount(u32),
     /// Reveal one more account in the picker (the `+` button).
     AddAccount,
-    PasswordChanged(String),
+    PasswordChanged(PasswordField, String),
     ImportShare,
     ExportShare,
 
@@ -172,8 +210,7 @@ pub struct State {
     selected_account: u32,
     /// Highest account index the picker offers; `+` reveals one more.
     max_account: u32,
-    /// Encrypts this device's key shares; needed to create, join and sign.
-    password: String,
+    passwords: Passwords,
 
     // Sessions and the wallet-setup ceremony
     invites: Vec<Invite>,
@@ -240,7 +277,7 @@ impl State {
             active_wallet_index: 0,
             selected_account: 0,
             max_account: 2,
-            password: String::new(),
+            passwords: Passwords::default(),
             invites: Vec::new(),
             active_session: None,
             ceremony_open: false,
@@ -338,8 +375,8 @@ impl State {
                 self.selected_account = self.max_account;
                 Task::none()
             }
-            Message::PasswordChanged(v) => {
-                self.password = v;
+            Message::PasswordChanged(field, v) => {
+                *self.passwords.get_mut(field) = v;
                 Task::none()
             }
             Message::ImportShare => {
@@ -347,7 +384,7 @@ impl State {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
-                let password = self.password.clone();
+                let password = self.passwords.backup.clone();
                 self.pending_action = Some(PendingAction::ImportShare);
                 self.set_status("Importing a key share");
                 action(async move { adapter.import_share(password).await })
@@ -360,7 +397,7 @@ impl State {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
-                let password = self.password.clone();
+                let password = self.passwords.backup.clone();
                 self.pending_action = Some(PendingAction::ExportShare);
                 self.set_status("Exporting the key share");
                 action(async move { adapter.export_share(wallet_id, curve, password).await })
@@ -379,7 +416,9 @@ impl State {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
-                let (name, password) = (self.wallet_name.clone(), self.password.clone());
+                let name = self.wallet_name.clone();
+                let password = std::mem::take(&mut self.passwords.create);
+                self.passwords.create_confirm.clear();
                 self.pending_action = Some(PendingAction::CreateWallet);
                 self.set_status("Creating the wallet invite");
                 action(async move { adapter.create_wallet(name, password).await })
@@ -389,7 +428,9 @@ impl State {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
-                let (id, password) = (self.invite_id.trim().to_string(), self.password.clone());
+                let id = self.invite_id.trim().to_string();
+                let password = std::mem::take(&mut self.passwords.join);
+                self.passwords.join_confirm.clear();
                 self.pending_action = Some(PendingAction::JoinWallet);
                 self.set_status("Joining the wallet");
                 action(async move { adapter.join_session(id, password).await })
@@ -424,7 +465,10 @@ impl State {
                 }
                 let adapter = self.adapter.clone();
                 let chain = self.sign_chain.to_string();
-                let (hex, password) = (self.sign_hex.trim().to_string(), self.password.clone());
+                let (hex, password) = (
+                    self.sign_hex.trim().to_string(),
+                    self.passwords.unlock.clone(),
+                );
                 self.pending_action = Some(PendingAction::Sign);
                 self.last_signature.clear();
                 self.set_status(
@@ -441,7 +485,7 @@ impl State {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
-                let password = self.password.clone();
+                let password = self.passwords.unlock.clone();
                 self.pending_action = Some(PendingAction::CoSign);
                 self.set_status("Co-signing");
                 action(async move { adapter.approve_signing(request_id, password).await })
@@ -574,10 +618,27 @@ impl State {
 
     /// Why "Create wallet" is disabled, if it is.
     fn create_blocker(&self) -> Option<&'static str> {
+        self.setup_blocker().or_else(|| {
+            new_password_problem(&self.passwords.create, &self.passwords.create_confirm)
+        })
+    }
+
+    /// Why "Join wallet" is disabled, if it is.
+    fn join_blocker(&self) -> Option<&'static str> {
+        self.setup_blocker()
+            .or_else(|| {
+                self.invite_id
+                    .trim()
+                    .is_empty()
+                    .then_some("Pick an invite or paste its ID.")
+            })
+            .or_else(|| new_password_problem(&self.passwords.join, &self.passwords.join_confirm))
+    }
+
+    /// What blocks both Create and Join, if anything.
+    fn setup_blocker(&self) -> Option<&'static str> {
         if !self.connected {
             Some("Connect to the network first.")
-        } else if let Some(problem) = password_problem(&self.password) {
-            Some(problem)
         } else if self.wallet_busy() {
             Some("A wallet setup is already in progress.")
         } else {
@@ -585,21 +646,11 @@ impl State {
         }
     }
 
-    /// Why "Join wallet" is disabled, if it is.
-    fn join_blocker(&self) -> Option<&'static str> {
-        self.create_blocker().or_else(|| {
-            self.invite_id
-                .trim()
-                .is_empty()
-                .then_some("Pick an invite or paste its ID.")
-        })
-    }
-
     /// Why "Import key share…" is disabled, if it is.
     fn import_blocker(&self) -> Option<&'static str> {
         if self.pending_action.is_some() {
             Some("Another action is in progress.")
-        } else if self.password.is_empty() {
+        } else if self.passwords.backup.is_empty() {
             Some("Enter the password the key share was exported with.")
         } else {
             None
@@ -613,7 +664,7 @@ impl State {
         } else if self.pending_action.is_some() {
             Some("Another action is in progress.")
         } else {
-            password_problem(&self.password)
+            password_problem(&self.passwords.backup)
         }
     }
 
@@ -635,8 +686,8 @@ impl State {
             Some("This wallet has no key for this device's curve.")
         } else if !self.connected {
             Some("Connect to the network first.")
-        } else if self.password.is_empty() {
-            Some("Enter your wallet password first (left panel).")
+        } else if self.passwords.unlock.is_empty() {
+            Some("Enter the wallet password.")
         } else if self.sign_hex.trim().is_empty() {
             Some("Enter the message to sign.")
         } else {
@@ -648,8 +699,8 @@ impl State {
     fn approve_blocker(&self) -> Option<&'static str> {
         if !self.connected {
             Some("Connect to the network first.")
-        } else if self.password.is_empty() {
-            Some("Enter your wallet password to approve.")
+        } else if self.passwords.unlock.is_empty() {
+            Some("Enter the wallet password to approve.")
         } else if self.pending_action.is_some() {
             Some("Another action is in progress.")
         } else {
@@ -890,36 +941,33 @@ impl State {
             ));
         }
 
-        body = body.push(section_divider()).push(field(
-            "Wallet password",
-            text_input("Password", &self.password)
-                .secure(true)
-                .on_input(Message::PasswordChanged),
-        ));
-        body = body.push(hint(
-            "Encrypts this device's key shares (at least 8 characters). Needed to create, \
-             join and sign.",
-        ));
         let backup = if self.wallets.is_empty() {
             self.import_blocker()
         } else {
             self.export_blocker().or(self.import_blocker())
         };
-        body = body.push(section_divider()).push(
-            row![
-                action_button("Import key share…").on_press_maybe(
-                    self.import_blocker()
-                        .is_none()
-                        .then_some(Message::ImportShare)
-                ),
-                action_button("Export key share…").on_press_maybe(
-                    self.export_blocker()
-                        .is_none()
-                        .then_some(Message::ExportShare)
-                ),
-            ]
-            .spacing(8),
-        );
+        body = body
+            .push(section_divider())
+            .push(text("Back up or restore").size(13))
+            .push(field(
+                "Key share password",
+                password_input("Password", &self.passwords.backup, PasswordField::Backup),
+            ))
+            .push(
+                row![
+                    action_button("Import key share…").on_press_maybe(
+                        self.import_blocker()
+                            .is_none()
+                            .then_some(Message::ImportShare)
+                    ),
+                    action_button("Export key share…").on_press_maybe(
+                        self.export_blocker()
+                            .is_none()
+                            .then_some(Message::ExportShare)
+                    ),
+                ]
+                .spacing(8),
+            );
         body = body.push(match backup {
             Some(reason) => text(reason).size(12).color(warning()).into(),
             None => hint(
@@ -1080,13 +1128,32 @@ impl State {
         if let Some(label) = &request.display_label {
             body = body.push(text(label).size(12).color(faint()));
         }
-        body = body
-            .push(
-                text(format!("Message  {}", short_addr(&request.message_hex)))
-                    .size(12)
-                    .color(faint()),
-            )
-            .push(actions);
+        body = body.push(
+            text(format!("Message  {}", short_addr(&request.message_hex)))
+                .size(12)
+                .color(faint()),
+        );
+        let awaiting = !matches!(
+            self.signing_state,
+            SigningState::Commitment
+                | SigningState::Share
+                | SigningState::Aggregating
+                | SigningState::Failed(_)
+        );
+        if awaiting {
+            body = body.push(
+                container(field(
+                    "Wallet password",
+                    password_input(
+                        "Unlocks this device's key share",
+                        &self.passwords.unlock,
+                        PasswordField::Unlock,
+                    ),
+                ))
+                .width(Length::Fixed(360.0)),
+            );
+        }
+        body = body.push(actions);
         Some(
             container(body)
                 .padding(14)
@@ -1114,6 +1181,12 @@ impl State {
                     "Wallet name",
                     text_input("e.g. Treasury", &self.wallet_name)
                         .on_input(Message::WalletNameChanged),
+                ),
+                new_password_fields(
+                    &self.passwords.create,
+                    &self.passwords.create_confirm,
+                    PasswordField::Create,
+                    PasswordField::CreateConfirm,
                 ),
                 action_row(
                     action_button("Create wallet")
@@ -1167,6 +1240,12 @@ impl State {
                     "Invite ID",
                     text_input("Paste invite ID", &self.invite_id)
                         .on_input(Message::InviteIdChanged),
+                ),
+                new_password_fields(
+                    &self.passwords.join,
+                    &self.passwords.join_confirm,
+                    PasswordField::Join,
+                    PasswordField::JoinConfirm,
                 ),
                 action_row(
                     action_button("Join wallet")
@@ -1237,6 +1316,14 @@ impl State {
                 text_input("0x…", &self.sign_hex).on_input(Message::SignHexChanged),
             ),
             hint(message_hint),
+            field(
+                "Wallet password",
+                password_input(
+                    "Unlocks this device's key share",
+                    &self.passwords.unlock,
+                    PasswordField::Unlock,
+                ),
+            ),
             action_row(
                 action_button(if signing {
                     "Signing…"
@@ -1309,12 +1396,56 @@ const MIN_PASSWORD_LEN: usize = 8;
 /// Why `password` can't encrypt a key share, if it can't.
 fn password_problem(password: &str) -> Option<&'static str> {
     if password.is_empty() {
-        Some("Set a wallet password first (left panel).")
+        Some("Enter a password (at least 8 characters).")
     } else if password.chars().count() < MIN_PASSWORD_LEN {
-        Some("The wallet password must be at least 8 characters.")
+        Some("The password must be at least 8 characters.")
     } else {
         None
     }
+}
+
+/// Why a new share password + its confirmation can't be used, if they can't.
+fn new_password_problem(password: &str, confirm: &str) -> Option<&'static str> {
+    password_problem(password)
+        .or_else(|| (password != confirm).then_some("The passwords don't match."))
+}
+
+/// Password + confirmation for a new key share, side by side.
+fn new_password_fields<'a>(
+    password: &str,
+    confirm: &str,
+    field_id: PasswordField,
+    confirm_id: PasswordField,
+) -> Element<'a, Message> {
+    column![
+        row![
+            container(field(
+                "Password",
+                password_input("At least 8 characters", password, field_id)
+            ))
+            .width(Length::Fill),
+            container(field(
+                "Confirm password",
+                password_input("Repeat it", confirm, confirm_id)
+            ))
+            .width(Length::Fill),
+        ]
+        .spacing(10),
+        hint("Encrypts this device's key share. You'll need it to sign."),
+    ]
+    .spacing(4)
+    .into()
+}
+
+fn password_input(
+    placeholder: &str,
+    value: &str,
+    field: PasswordField,
+) -> Element<'static, Message> {
+    text_input(placeholder, value)
+        .secure(true)
+        .on_input(move |v| Message::PasswordChanged(field, v))
+        .into()
 }
 
 fn signing_phase(state: &SigningState) -> &'static str {
@@ -1450,9 +1581,13 @@ fn action_row<'a>(
     action: iced::widget::Button<'a, Message>,
     blocker: Option<&'a str>,
 ) -> Element<'a, Message> {
+    // The reason takes the remaining width and wraps; the button keeps its
+    // size, so a long reason in a narrow card can't squeeze it away.
     row![
-        text(blocker.unwrap_or_default()).size(12).color(warning()),
-        Space::new().width(Length::Fill),
+        text(blocker.unwrap_or_default())
+            .size(12)
+            .color(warning())
+            .width(Length::Fill),
         action,
     ]
     .spacing(12)
@@ -1697,18 +1832,31 @@ mod tests {
 
         connected(&mut state);
         assert!(clicked(&state, "Create wallet").is_empty());
-        state.password = "short".to_string();
+        state.passwords.create = "short".to_string();
+        state.passwords.create_confirm = "short".to_string();
         assert!(
             simulator(state.view())
-                .find("The wallet password must be at least 8 characters.")
+                .find("The password must be at least 8 characters.")
                 .is_ok()
         );
         assert!(clicked(&state, "Create wallet").is_empty());
-        state.password = "password1".to_string();
+        state.passwords.create = "password1".to_string();
+        state.passwords.create_confirm = "password2".to_string();
+        assert!(
+            simulator(state.view())
+                .find("The passwords don't match.")
+                .is_ok()
+        );
+        assert!(clicked(&state, "Create wallet").is_empty());
+        state.passwords.create_confirm = "password1".to_string();
         assert!(matches!(
             clicked(&state, "Create wallet").as_slice(),
             [Message::CreateWallet]
         ));
+
+        // The new password isn't kept around once it's been handed over.
+        let _ = state.update(Message::CreateWallet);
+        assert!(state.passwords.create.is_empty() && state.passwords.create_confirm.is_empty());
         let _ = std::fs::remove_dir_all(keystore);
     }
 
@@ -1725,7 +1873,7 @@ mod tests {
                 .is_ok()
         );
         assert!(clicked(&state, "Approve & sign").is_empty());
-        state.password = "pw".to_string();
+        state.passwords.unlock = "pw".to_string();
         assert!(matches!(
             clicked(&state, "Approve & sign").as_slice(),
             [Message::ApproveSignatureRequest(id)] if id == "req-1"
@@ -1742,7 +1890,8 @@ mod tests {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
         connected(&mut state);
-        state.password = "password1".to_string();
+        state.passwords.join = "password1".to_string();
+        state.passwords.join_confirm = "password1".to_string();
         // Section titles are headings, not a second set of buttons.
         assert!(clicked(&state, "Create a new wallet").is_empty());
         assert!(clicked(&state, "Join a wallet").is_empty());
@@ -1759,12 +1908,12 @@ mod tests {
     async fn export_needs_a_wallet_and_an_8_character_password() {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
-        state.password = "password1".to_string();
+        state.passwords.backup = "password1".to_string();
         assert!(clicked(&state, "Export key share…").is_empty());
         with_wallet(&mut state);
-        state.password = "short".to_string();
+        state.passwords.backup = "short".to_string();
         assert!(clicked(&state, "Export key share…").is_empty());
-        state.password = "password1".to_string();
+        state.passwords.backup = "password1".to_string();
         assert!(matches!(
             clicked(&state, "Export key share…").as_slice(),
             [Message::ExportShare]
@@ -1789,6 +1938,12 @@ mod tests {
     #[test]
     fn eight_character_password_is_accepted() {
         assert_eq!(password_problem("12345678"), None);
+    }
+
+    #[test]
+    fn new_password_must_match_its_confirmation() {
+        assert!(new_password_problem("12345678", "12345679").is_some());
+        assert_eq!(new_password_problem("12345678", "12345678"), None);
     }
 
     #[tokio::test]
@@ -1831,7 +1986,14 @@ mod tests {
         shot(&state, "1-offline");
 
         connected(&mut state);
-        state.password = "password1".to_string();
+        state.passwords = Passwords {
+            create: "password1".to_string(),
+            create_confirm: "password1".to_string(),
+            join: "password1".to_string(),
+            join_confirm: "password1".to_string(),
+            unlock: "password1".to_string(),
+            backup: String::new(),
+        };
         state.wallet_name = "Treasury".to_string();
         shot(&state, "2-create");
 
