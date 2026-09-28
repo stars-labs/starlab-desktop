@@ -147,6 +147,10 @@ pub enum Message {
 
     /// Result of an async core action; failures surface in the status bar.
     ActionDone(Result<(), String>),
+
+    /// Tab / Shift+Tab: move keyboard focus between inputs.
+    FocusNext,
+    FocusPrevious,
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +313,11 @@ impl State {
     fn subscription(&self) -> Subscription<Message> {
         // `Subscription::run` identifies the subscription by the worker fn,
         // so it's spawned exactly once for the app's life.
-        Subscription::run(ui_bridge)
+        Subscription::batch([
+            Subscription::run(ui_bridge),
+            // Iced doesn't move focus on Tab by itself.
+            iced::keyboard::listen().filter_map(tab_focus),
+        ])
     }
 
     // -- Update ---------------------------------------------------------
@@ -499,6 +507,9 @@ impl State {
                 let adapter = self.adapter.clone();
                 action(async move { adapter.dismiss_signing().await })
             }
+
+            Message::FocusNext => iced::widget::operation::focus_next(),
+            Message::FocusPrevious => iced::widget::operation::focus_previous(),
 
             Message::ActionDone(result) => {
                 // Create/join only queue a message to the runner; from here on
@@ -1448,6 +1459,23 @@ fn password_input(
         .into()
 }
 
+/// Tab moves focus forward, Shift+Tab back.
+fn tab_focus(event: iced::keyboard::Event) -> Option<Message> {
+    use iced::keyboard::{Event, Key, key::Named};
+    match event {
+        Event::KeyPressed {
+            key: Key::Named(Named::Tab),
+            modifiers,
+            ..
+        } => Some(if modifiers.shift() {
+            Message::FocusPrevious
+        } else {
+            Message::FocusNext
+        }),
+        _ => None,
+    }
+}
+
 fn signing_phase(state: &SigningState) -> &'static str {
     match state {
         SigningState::Aggregating => "Combining signatures…",
@@ -1922,6 +1950,55 @@ mod tests {
             state.export_target(),
             Some(("9c1f4e2ab37d".to_string(), "secp256k1".to_string()))
         );
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    fn key_press(
+        key: iced::keyboard::Key,
+        modifiers: iced::keyboard::Modifiers,
+    ) -> iced::keyboard::Event {
+        iced::keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: iced::keyboard::key::Physical::Unidentified(
+                iced::keyboard::key::NativeCode::Unidentified,
+            ),
+            location: iced::keyboard::Location::Standard,
+            modifiers,
+            text: None,
+            repeat: false,
+        }
+    }
+
+    #[test]
+    fn tab_moves_focus_forward_and_shift_tab_back() {
+        use iced::keyboard::{Key, Modifiers, key::Named};
+        let tab = Key::Named(Named::Tab);
+        assert!(matches!(
+            tab_focus(key_press(tab.clone(), Modifiers::empty())),
+            Some(Message::FocusNext)
+        ));
+        assert!(matches!(
+            tab_focus(key_press(tab, Modifiers::SHIFT)),
+            Some(Message::FocusPrevious)
+        ));
+        assert!(tab_focus(key_press(Key::Named(Named::Enter), Modifiers::empty())).is_none());
+    }
+
+    /// The focus subscription only sees keys no widget captured: a focused
+    /// text input must let Tab through.
+    #[tokio::test]
+    async fn focused_input_lets_tab_through() {
+        let _renderer = renderer_lock();
+        let (state, keystore) = test_state();
+        let mut ui = simulator(state.view());
+        ui.click("e.g. Treasury").expect("wallet name input");
+        assert!(
+            ui.find(iced_test::selector::is_focused()).is_ok(),
+            "input not focused"
+        );
+        let status = ui.tap_key(iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab));
+        assert_eq!(status, iced::event::Status::Ignored);
         let _ = std::fs::remove_dir_all(keystore);
     }
 
