@@ -35,8 +35,6 @@ frost-secp256k1-tr = { version = "3.0.0", features = ["serde", "serialization"] 
 # tokio::task::spawn_blocking for rfd dialogs.
 tokio = { version = "1.53.1", features = ["full"] }
 
-# serde_json::json! for UI-event payloads.
-serde_json = "1.0.151"
 
 # Error handling in the CoreAdapter wrappers.
 anyhow = "1.0.104"
@@ -61,5 +59,6 @@ path = "src/main.rs"
 [dev-dependencies]
 # Headless UI tests: simulate clicks and render snapshots without a window.
 iced_test = "0.14"
+serde_json = "1.0.151"
 # In-process signal server for the end-to-end create → sign test.
 starlab-signal-server = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }

@@ -34,7 +34,9 @@ pub struct WalletView {
     pub keys: Vec<(String, String)>,
 }
 
-/// A session announced in the room, as the desktop shows it.
+/// A new-wallet (DKG) session announced in the room. Peers' signing
+/// requests reach the UI through the signing manager instead
+/// (`UiEvent::SigningRequest`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Invite {
     pub id: String,
@@ -43,18 +45,6 @@ pub struct Invite {
     pub participants: Vec<String>,
     pub threshold: u16,
     pub total: u16,
-    pub kind: InviteKind,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum InviteKind {
-    /// A new shared wallet (DKG) looking for devices.
-    Wallet,
-    /// A request to co-sign `message_hex` with the account wallet `wallet_id`.
-    Signing {
-        wallet_id: String,
-        message_hex: String,
-    },
 }
 
 /// One UI-state mutation pushed from the async core into the Iced app.
@@ -72,6 +62,9 @@ pub enum UiEvent {
     /// The runner has a wallet ceremony open — as creator (invite announced)
     /// or joiner (joined, waiting for DKG). Cleared on finalize/cancel.
     CeremonyOpen(bool),
+    /// The signing manager's current request: ours while we sign, or a
+    /// peer's (`session_id` set) waiting for this device to approve.
+    SigningRequest(Option<SigningRequest>),
     SigningState(SigningState),
     SigningComplete(String),
     Message {
@@ -115,9 +108,10 @@ impl UICallback for NativeUICallback {
     async fn update_dkg_participants(&self, _participants: Vec<ParticipantInfo>) {}
     async fn update_offline_status(&self, _enabled: bool, _sd_card_detected: bool) {}
     async fn update_sd_operations(&self, _operations: Vec<SDCardOperation>) {}
-    // The desktop signs in one step (request + approve), so the manager's
-    // "confirm this request" hook has nothing to show.
-    async fn update_signing_request(&self, _request: Option<SigningRequest>) {}
+
+    async fn update_signing_request(&self, request: Option<SigningRequest>) {
+        self.send(UiEvent::SigningRequest(request));
+    }
 
     async fn update_signing_state(&self, state: SigningState) {
         self.send(UiEvent::SigningState(state));

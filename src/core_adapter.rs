@@ -6,7 +6,7 @@
 
 use starlab_client::AppState;
 use starlab_client::core::{
-    CoreState, UICallback, WalletInfo,
+    CoreState, UICallback,
     signing_backend::{ElmSigningBackend, SigningEventSink},
     signing_manager::SigningManager,
 };
@@ -17,7 +17,7 @@ use starlab_client::protocal::signal::{SessionInfo as SignalSession, SessionType
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
-use crate::ui_callback::{Invite, InviteKind, NativeUICallback, UiEvent};
+use crate::ui_callback::{Invite, NativeUICallback, UiEvent};
 
 /// Shape of every wallet the desktop creates: 2-of-3. The UI states this so
 /// users know how many devices to bring.
@@ -133,24 +133,14 @@ fn rich_wallets(model: &Model) -> Vec<crate::ui_callback::WalletView> {
     by_id.into_values().collect()
 }
 
-/// The desktop's view of a session in the room: new-wallet invites and
-/// signing requests. Other session types (reshare) aren't surfaced.
+/// A new-wallet invite; signing and reshare sessions aren't invites.
 fn invite(session: &SignalSession) -> Option<Invite> {
-    let kind = match &session.session_type {
-        SessionType::DKG => InviteKind::Wallet,
-        SessionType::Signing { wallet_name, .. } => InviteKind::Signing {
-            wallet_id: wallet_name.clone(),
-            message_hex: session.signing_message_hex.clone().unwrap_or_default(),
-        },
-        _ => return None,
-    };
-    Some(Invite {
+    (session.session_type == SessionType::DKG).then(|| Invite {
         id: session.session_id.clone(),
         proposer: session.proposer_id.clone(),
         participants: session.participants.clone(),
         threshold: session.threshold,
         total: session.total,
-        kind,
     })
 }
 
@@ -159,8 +149,12 @@ fn ceremony_open(model: &Model) -> bool {
     model.wallet_state.creating_wallet.is_some() || model.wallet_state.joining_session.is_some()
 }
 
+/// Late-bound signing observers fed from the runner's `on_sync`: the sink
+/// resolves ceremonies; the manager turns a peer's signing announce into an
+/// approval request.
+type SigningSlot = Arc<std::sync::Mutex<Option<(SigningEventSink, Arc<SigningManager>)>>>;
+
 pub struct CoreAdapter {
-    state: Arc<CoreState>,
     signing_manager: Arc<SigningManager>,
     runner_tx: UnboundedSender<Message>,
     /// Mutable runner configuration that `TriggerReconnect` reads.
@@ -179,22 +173,21 @@ impl CoreAdapter {
         signal_url: String,
         curve: String,
     ) -> Self {
-        let state = Arc::new(CoreState::new());
         let ui_callback: Arc<dyn UICallback> = Arc::new(NativeUICallback::new(ui_tx.clone()));
 
-        // Signing backend sink (#94): the backend is constructed AFTER spawn
-        // (it needs runner_tx), so on_sync reads it through a late-bound slot.
-        let sink_slot: Arc<std::sync::Mutex<Option<SigningEventSink>>> =
-            Arc::new(std::sync::Mutex::new(None));
-        let sink_for_sync = sink_slot.clone();
+        // The signing backend and manager need runner_tx, so they're built
+        // after the spawn and reach on_sync through a late-bound slot.
+        let signing_slot: SigningSlot = Arc::new(std::sync::Mutex::new(None));
+        let signing_for_sync = signing_slot.clone();
 
         // on_sync: mirror the runner's model into the UI after every message.
         let on_sync = move |model: &Model, msg: Option<&Message>| {
             if let Some(m) = msg
-                && let Ok(guard) = sink_for_sync.lock()
-                && let Some(sink) = guard.as_ref()
+                && let Ok(guard) = signing_for_sync.lock()
+                && let Some((sink, manager)) = guard.as_ref()
             {
                 sink.observe(m);
+                manager.observe(model, m);
             }
             // `Complete` means the wallet finalized — show idle even if the
             // engine hasn't flipped `dkg_in_progress` back on this path.
@@ -237,12 +230,12 @@ impl CoreAdapter {
         }
 
         let (backend, sink) = ElmSigningBackend::new(runner_tx.clone());
-        *sink_slot.lock().unwrap() = Some(sink);
-        let signing_manager =
-            Arc::new(SigningManager::new(state.clone(), ui_callback).with_backend(backend));
+        let signing_manager = Arc::new(
+            SigningManager::new(Arc::new(CoreState::new()), ui_callback).with_backend(backend),
+        );
+        *signing_slot.lock().unwrap() = Some((sink, signing_manager.clone()));
 
         Self {
-            state,
             signing_manager,
             runner_tx,
             runner_control,
@@ -285,9 +278,8 @@ impl CoreAdapter {
             .map_err(|e| e.to_string())
     }
 
-    /// Join session `session_id`: a new-wallet invite (contributes to its
-    /// DKG) or a signing request (co-signs it). `password` encrypts the new
-    /// share, or unlocks the existing one to co-sign.
+    /// Join the new-wallet invite `session_id`; `password` encrypts this
+    /// device's share.
     pub async fn join_session(&self, session_id: String, password: String) -> Result<(), String> {
         self.runner_tx
             .send(Message::HeadlessJoinSession {
@@ -315,27 +307,41 @@ impl CoreAdapter {
         message_hex: String,
         password: String,
     ) -> Result<(), String> {
-        // SigningManager signs `wallets[active_wallet_index]`; point it at
-        // exactly the account wallet the user picked.
-        *self.state.wallets.lock().await = vec![WalletInfo {
-            id: wallet_id,
-            name: String::new(),
-            address: String::new(),
-            balance: String::new(),
-            chain: chain.clone(),
-            threshold: String::new(),
-            participants: Vec::new(),
-        }];
-        *self.state.active_wallet_index.lock().await = 0;
         let request_id = self
             .signing_manager
-            .request_signing(message_hex, chain, None)
+            .request_signing(wallet_id, message_hex, chain, None)
             .await
             .map_err(|e| e.to_string())?;
+        self.approve_signing(request_id, password).await
+    }
+
+    /// Approve signing request `request_id` with the wallet password and wait
+    /// for the ceremony: a peer's request joins its session as a co-signer.
+    pub async fn approve_signing(
+        &self,
+        request_id: String,
+        password: String,
+    ) -> Result<(), String> {
         self.signing_manager
             .approve_and_sign(&request_id, password)
             .await
             .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    /// Decline a peer's signing request (the engine drops its invite).
+    pub async fn reject_signing(&self, request_id: String) -> Result<(), String> {
+        self.signing_manager
+            .reject(&request_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Close a signing request whose ceremony failed.
+    pub async fn dismiss_signing(&self) -> Result<(), String> {
+        self.signing_manager
+            .dismiss()
+            .await
             .map_err(|e| e.to_string())
     }
 }
@@ -436,7 +442,7 @@ mod tests {
             let invite_id = next_match(rx, "wallet invite", |e| match e {
                 UiEvent::Invites(invites) => invites
                     .iter()
-                    .find(|i| i.kind == InviteKind::Wallet && i.proposer == "device-0")
+                    .find(|i| i.proposer == "device-0")
                     .map(|i| i.id.clone()),
                 _ => None,
             })
@@ -470,17 +476,14 @@ mod tests {
         });
         let (approver, approver_rx, _, approver_password) = &mut devices[0];
         let request_id = next_match(approver_rx, "signature request", |e| match e {
-            UiEvent::Invites(invites) => invites
-                .iter()
-                .find(|i| matches!(i.kind, InviteKind::Signing { .. }))
-                .map(|i| i.id.clone()),
+            UiEvent::SigningRequest(Some(r)) if r.session_id.is_some() => Some(r.id.clone()),
             _ => None,
         })
         .await;
         approver
-            .join_session(request_id, approver_password.clone())
+            .approve_signing(request_id, approver_password.clone())
             .await
-            .unwrap();
+            .expect("co-signing succeeded");
 
         signing.await.unwrap().expect("signing succeeded");
         let signature = next_match(&mut signer_rx, "signature", |e| match e {
@@ -511,11 +514,8 @@ mod tests {
     }
 
     #[test]
-    fn wallet_invites_and_signing_requests_are_told_apart() {
-        assert_eq!(
-            invite(&session(SessionType::DKG, None)).unwrap().kind,
-            InviteKind::Wallet
-        );
+    fn only_new_wallet_sessions_are_invites() {
+        assert!(invite(&session(SessionType::DKG, None)).is_some());
         let signing = session(
             SessionType::Signing {
                 wallet_name: "w-ethereum-0".to_string(),
@@ -525,13 +525,128 @@ mod tests {
             },
             Some("abcd"),
         );
-        assert_eq!(
-            invite(&signing).unwrap().kind,
-            InviteKind::Signing {
-                wallet_id: "w-ethereum-0".to_string(),
-                message_hex: "abcd".to_string(),
-            }
+        assert!(invite(&signing).is_none());
+    }
+
+    /// A real adapter (unreachable signal server) for device `me` whose
+    /// keystore holds wallet `w1`, plus its UI channel. Returns once the
+    /// runner has loaded the wallet (an announce processed before that
+    /// would not be for "a wallet we hold").
+    async fn adapter_holding_w1() -> (
+        CoreAdapter,
+        tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+        std::path::PathBuf,
+    ) {
+        let keystore = std::env::temp_dir().join(format!("starlab-test-{}", uuid::Uuid::new_v4()));
+        let wallet_dir = keystore.join("me").join("secp256k1");
+        std::fs::create_dir_all(&wallet_dir).unwrap();
+        let wallet_file = serde_json::json!({
+            "version": "2.0",
+            "encrypted": true,
+            "algorithm": "AES-256-GCM-PBKDF2",
+            "data": "",
+            "metadata": {
+                "session_id": "w1",
+                "device_id": "me",
+                "curve_type": "secp256k1",
+                "threshold": 2,
+                "total_participants": 3,
+                "participant_index": 2,
+                "group_public_key": "",
+                "created_at": "",
+                "last_modified": "",
+            },
+        });
+        std::fs::write(wallet_dir.join("w1.json"), wallet_file.to_string()).unwrap();
+
+        let (ui_tx, mut ui_rx) = tokio::sync::mpsc::unbounded_channel();
+        let adapter = CoreAdapter::new(
+            ui_tx,
+            "me".to_string(),
+            keystore.to_string_lossy().into_owned(),
+            "ws://127.0.0.1:9".to_string(),
+            "secp256k1".to_string(),
         );
+        next_match(&mut ui_rx, "the test wallet", |e| match e {
+            UiEvent::Wallets(wallets) if !wallets.is_empty() => Some(()),
+            _ => None,
+        })
+        .await;
+        (adapter, ui_rx, keystore)
+    }
+
+    fn peer_signing_announce(wallet_name: &str) -> Message {
+        Message::SessionDiscovered {
+            session: SignalSession {
+                session_id: "sign-1".to_string(),
+                proposer_id: "peer".to_string(),
+                total: 3,
+                threshold: 2,
+                participants: vec!["peer".to_string(), "me".to_string()],
+                session_type: SessionType::Signing {
+                    wallet_name: wallet_name.to_string(),
+                    curve_type: "secp256k1".to_string(),
+                    // The account id wins over this field.
+                    blockchain: "ethereum".to_string(),
+                    group_public_key: String::new(),
+                },
+                curve_type: "secp256k1".to_string(),
+                coordination_type: "network".to_string(),
+                signing_message_hex: Some("deadbeef".to_string()),
+            },
+        }
+    }
+
+    async fn next_signing_request(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<UiEvent>,
+    ) -> Option<starlab_client::core::SigningRequest> {
+        next_match(rx, "a signing request update", |e| match e {
+            UiEvent::SigningRequest(request) => Some(request.clone()),
+            _ => None,
+        })
+        .await
+    }
+
+    #[tokio::test]
+    async fn peer_signing_session_raises_a_request() {
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1().await;
+        adapter
+            .runner_tx
+            .send(peer_signing_announce("w1-ethereum-0"))
+            .unwrap();
+        let request = next_signing_request(&mut ui_rx)
+            .await
+            .expect("a peer's signing session must raise a request");
+        assert_eq!(request.session_id.as_deref(), Some("sign-1"));
+        assert_eq!(request.message_hex, "deadbeef");
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn rejecting_a_peer_request_closes_it() {
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1().await;
+        adapter
+            .runner_tx
+            .send(peer_signing_announce("w1-ethereum-0"))
+            .unwrap();
+        let request = next_signing_request(&mut ui_rx).await.unwrap();
+        adapter.reject_signing(request.id).await.unwrap();
+        assert!(next_signing_request(&mut ui_rx).await.is_none());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn bitcoin_account_request_shows_bitcoin() {
+        let (adapter, mut ui_rx, keystore) = adapter_holding_w1().await;
+        adapter
+            .runner_tx
+            .send(peer_signing_announce("w1-bitcoin-0"))
+            .unwrap();
+        assert_eq!(
+            next_signing_request(&mut ui_rx).await.unwrap().chain,
+            "bitcoin"
+        );
+        let _ = std::fs::remove_dir_all(keystore);
     }
 
     #[tokio::test]

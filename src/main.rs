@@ -23,8 +23,8 @@ use iced::widget::{
 use iced::{Alignment, Background, Border, Color, Element, Length, Subscription, Task, Theme};
 
 use core_adapter::{CoreAdapter, DEFAULT_THRESHOLD, DEFAULT_TOTAL};
-use starlab_client::core::SigningState;
-use ui_callback::{Invite, InviteKind, UiEvent, WalletView};
+use starlab_client::core::{SigningRequest, SigningState};
+use ui_callback::{Invite, UiEvent, WalletView};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -104,8 +104,11 @@ pub enum Message {
     SignHexChanged(String),
     Sign,
     CopySignature,
-    /// Co-sign a peer's signing request (its session id).
+    /// Co-sign a peer's signing request (its request id).
     ApproveSignatureRequest(String),
+    RejectSignatureRequest(String),
+    /// Close a peer's request whose ceremony failed.
+    DismissSigning,
 
     /// Result of an async core action; failures surface in the status bar.
     ActionDone(Result<(), String>),
@@ -182,6 +185,9 @@ pub struct State {
     dkg_progress: f32,
 
     // Signing
+    /// The signing manager's request: ours while we sign, or a peer's
+    /// (`session_id` set) waiting for this device.
+    signing_request: Option<SigningRequest>,
     sign_chain: &'static str,
     sign_hex: String,
     signing_state: SigningState,
@@ -242,6 +248,7 @@ impl State {
             dkg_active: false,
             dkg_round: 0,
             dkg_progress: 0.0,
+            signing_request: None,
             sign_chain: starlab_core::accounts::chains_for_curve(signing_curve)[0].0,
             sign_hex: String::new(),
             signing_state: SigningState::Idle,
@@ -412,15 +419,24 @@ impl State {
                 self.set_status("Signature copied");
                 iced::clipboard::write(self.last_signature.clone())
             }
-            Message::ApproveSignatureRequest(session_id) => {
+            Message::ApproveSignatureRequest(request_id) => {
                 if self.approve_blocker().is_some() {
                     return Task::none();
                 }
                 let adapter = self.adapter.clone();
                 let password = self.password.clone();
                 self.pending_action = Some(PendingAction::CoSign);
-                self.set_status("Approving the signature request");
-                action(async move { adapter.join_session(session_id, password).await })
+                self.set_status("Co-signing");
+                action(async move { adapter.approve_signing(request_id, password).await })
+            }
+            Message::RejectSignatureRequest(request_id) => {
+                self.set_status("Signature request declined");
+                let adapter = self.adapter.clone();
+                action(async move { adapter.reject_signing(request_id).await })
+            }
+            Message::DismissSigning => {
+                let adapter = self.adapter.clone();
+                action(async move { adapter.dismiss_signing().await })
             }
 
             Message::ActionDone(result) => {
@@ -469,10 +485,16 @@ impl State {
                 self.dkg_progress = progress;
             }
             UiEvent::CeremonyOpen(open) => self.ceremony_open = open,
+            UiEvent::SigningRequest(request) => self.signing_request = request,
             UiEvent::SigningState(state) => self.signing_state = state,
             UiEvent::SigningComplete(signature) => {
-                self.last_signature = signature;
-                self.set_status("Signature ready");
+                // A co-signer's copy of the signature belongs to the requester.
+                if self.pending_action == Some(PendingAction::CoSign) {
+                    self.set_status("Co-signed — the requesting device has the signature");
+                } else {
+                    self.last_signature = signature;
+                    self.set_status("Signature ready");
+                }
             }
             UiEvent::Message {
                 log_line,
@@ -915,48 +937,63 @@ impl State {
         )
     }
 
-    /// Pinned while peers ask this device to co-sign.
+    /// Pinned while a peer asks this device to co-sign.
     fn signature_requests(&self) -> Option<Element<'_, Message>> {
-        let requests =
-            incoming_requests(&self.device_id, &self.invites, self.active_session.as_ref());
-        if requests.is_empty() {
-            return None;
-        }
+        let request = self
+            .signing_request
+            .as_ref()
+            .filter(|r| r.session_id.is_some())?;
         let blocker = self.approve_blocker();
-        let mut body = Column::new()
-            .spacing(12)
-            .push(text("Signature requests").size(15));
-        for request in requests {
-            let InviteKind::Signing {
-                wallet_id,
-                message_hex,
-            } = &request.kind
-            else {
-                continue;
-            };
-            body = body.push(
-                column![
-                    text(format!("{} asks this device to co-sign", request.proposer)).size(13),
-                    text(self.describe_account_wallet(wallet_id))
-                        .size(12)
-                        .color(muted()),
-                    text(format!("Message  {}", short_addr(message_hex)))
-                        .size(12)
-                        .color(faint()),
-                    action_row(
-                        action_button("Approve & sign")
-                            .style(button::primary)
-                            .on_press_maybe(
-                                blocker
-                                    .is_none()
-                                    .then(|| Message::ApproveSignatureRequest(request.id.clone())),
-                            ),
-                        blocker,
+        let actions: Element<'_, Message> = match &self.signing_state {
+            SigningState::Commitment | SigningState::Share | SigningState::Aggregating => {
+                text("Co-signing…").size(13).color(accent()).into()
+            }
+            SigningState::Failed(error) => row![
+                text(format!("Signing failed: {error}"))
+                    .size(12)
+                    .color(danger()),
+                Space::new().width(Length::Fill),
+                action_button("Dismiss").on_press(Message::DismissSigning),
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+            _ => row![
+                text(blocker.unwrap_or_default()).size(12).color(warning()),
+                Space::new().width(Length::Fill),
+                action_button("Reject")
+                    .style(button::secondary)
+                    .on_press(Message::RejectSignatureRequest(request.id.clone())),
+                action_button("Approve & sign")
+                    .style(button::primary)
+                    .on_press_maybe(
+                        blocker
+                            .is_none()
+                            .then(|| Message::ApproveSignatureRequest(request.id.clone())),
                     ),
-                ]
-                .spacing(4),
-            );
+            ]
+            .spacing(8)
+            .align_y(Alignment::Center)
+            .into(),
+        };
+        let mut body = column![
+            text("Signature request").size(15),
+            text("Another device of this wallet asks this device to co-sign.").size(13),
+            text(self.describe_account_wallet(&request.wallet_id))
+                .size(12)
+                .color(muted()),
+        ]
+        .spacing(4);
+        if let Some(label) = &request.display_label {
+            body = body.push(text(label).size(12).color(faint()));
         }
+        body = body
+            .push(
+                text(format!("Message  {}", short_addr(&request.message_hex)))
+                    .size(12)
+                    .color(faint()),
+            )
+            .push(actions);
         Some(
             container(body)
                 .padding(14)
@@ -1183,24 +1220,7 @@ fn own_invite<'a>(device_id: &str, active: Option<&'a Invite>) -> Option<&'a Inv
 
 /// New-wallet invites from other devices.
 fn wallet_invites<'a>(device_id: &str, invites: &'a [Invite]) -> Vec<&'a Invite> {
-    invites
-        .iter()
-        .filter(|i| i.kind == InviteKind::Wallet && i.proposer != device_id)
-        .collect()
-}
-
-/// Peers' signing requests this device is part of and hasn't joined yet.
-fn incoming_requests<'a>(
-    device_id: &str,
-    invites: &'a [Invite],
-    active: Option<&Invite>,
-) -> Vec<&'a Invite> {
-    invites
-        .iter()
-        .filter(|i| matches!(i.kind, InviteKind::Signing { .. }))
-        .filter(|i| i.proposer != device_id && i.participants.iter().any(|p| p == device_id))
-        .filter(|i| active.is_none_or(|a| a.id != i.id))
-        .collect()
+    invites.iter().filter(|i| i.proposer != device_id).collect()
 }
 
 fn signing_phase(state: &SigningState) -> &'static str {
@@ -1438,75 +1458,52 @@ fn faint() -> Color {
 mod tests {
     use super::*;
 
-    fn invite(id: &str, proposer: &str, participants: &[&str], kind: InviteKind) -> Invite {
+    fn invite(id: &str, proposer: &str, participants: &[&str]) -> Invite {
         Invite {
             id: id.to_string(),
             proposer: proposer.to_string(),
             participants: participants.iter().map(|p| p.to_string()).collect(),
             threshold: 2,
             total: 3,
-            kind,
         }
     }
 
-    fn signing(wallet_id: &str) -> InviteKind {
-        InviteKind::Signing {
+    /// A peer's request to co-sign with `wallet_id`.
+    fn peer_request(wallet_id: &str, message_hex: &str) -> SigningRequest {
+        SigningRequest {
+            id: "req-1".to_string(),
             wallet_id: wallet_id.to_string(),
-            message_hex: "00".to_string(),
+            message_hex: message_hex.to_string(),
+            display_label: None,
+            chain: "ethereum".to_string(),
+            created_at: String::new(),
+            session_id: Some("sig-1".to_string()),
         }
     }
 
     #[test]
     fn joined_session_is_not_shown_as_own_invite() {
-        let joined = invite("s1", "peer", &["peer", "me"], InviteKind::Wallet);
+        let joined = invite("s1", "peer", &["peer", "me"]);
         assert_eq!(own_invite("me", Some(&joined)), None);
     }
 
     #[test]
     fn created_session_is_shown_as_own_invite() {
-        let created = invite("s1", "me", &["me"], InviteKind::Wallet);
+        let created = invite("s1", "me", &["me"]);
         assert_eq!(own_invite("me", Some(&created)), Some(&created));
     }
 
     #[test]
-    fn wallet_invites_exclude_our_own_and_signing_requests() {
+    fn wallet_invites_exclude_our_own() {
         let invites = [
-            invite("mine", "me", &["me"], InviteKind::Wallet),
-            invite("theirs", "peer", &["peer"], InviteKind::Wallet),
-            invite("sign", "peer", &["peer", "me"], signing("w-ethereum-0")),
+            invite("mine", "me", &["me"]),
+            invite("theirs", "peer", &["peer"]),
         ];
         let ids: Vec<_> = wallet_invites("me", &invites)
             .iter()
             .map(|i| i.id.as_str())
             .collect();
         assert_eq!(ids, ["theirs"]);
-    }
-
-    #[test]
-    fn incoming_requests_are_peer_signing_sessions_we_belong_to() {
-        let invites = [
-            invite("for-us", "peer", &["peer", "me"], signing("w-ethereum-0")),
-            invite(
-                "not-ours",
-                "peer",
-                &["peer", "other"],
-                signing("x-ethereum-0"),
-            ),
-            invite("our-own", "me", &["me", "peer"], signing("w-ethereum-0")),
-            invite("wallet", "peer", &["peer"], InviteKind::Wallet),
-        ];
-        let ids: Vec<_> = incoming_requests("me", &invites, None)
-            .iter()
-            .map(|i| i.id.as_str())
-            .collect();
-        assert_eq!(ids, ["for-us"]);
-    }
-
-    #[test]
-    fn approved_request_leaves_the_list() {
-        let request = invite("for-us", "peer", &["peer", "me"], signing("w-ethereum-0"));
-        let invites = [request.clone()];
-        assert!(incoming_requests("me", &invites, Some(&request)).is_empty());
     }
 
     // ---- Headless UI tests (iced_test): real widgets, simulated clicks ----
@@ -1620,12 +1617,7 @@ mod tests {
         let (mut state, keystore) = test_state();
         connected(&mut state);
         with_wallet(&mut state);
-        state.invites = vec![invite(
-            "sig-1",
-            "laptop",
-            &["laptop", "me"],
-            signing("9c1f4e2ab37d-ethereum-0"),
-        )];
+        state.signing_request = Some(peer_request("9c1f4e2ab37d-ethereum-0", "00"));
         assert!(
             simulator(state.view())
                 .find("Treasury · Ethereum · Account 0")
@@ -1635,7 +1627,11 @@ mod tests {
         state.password = "pw".to_string();
         assert!(matches!(
             clicked(&state, "Approve & sign").as_slice(),
-            [Message::ApproveSignatureRequest(id)] if id == "sig-1"
+            [Message::ApproveSignatureRequest(id)] if id == "req-1"
+        ));
+        assert!(matches!(
+            clicked(&state, "Reject").as_slice(),
+            [Message::RejectSignatureRequest(id)] if id == "req-1"
         ));
         let _ = std::fs::remove_dir_all(keystore);
     }
@@ -1690,13 +1686,11 @@ mod tests {
                 "7d2e0c4b-1a9f-4c3e-b8d5-62f0a1e9c7b4",
                 "laptop",
                 &["laptop"],
-                InviteKind::Wallet,
             ),
             invite(
                 "c0a5e8f1-3b6d-4e29-9f7a-18d4b2c6e053",
                 "phone",
                 &["phone", "tablet"],
-                InviteKind::Wallet,
             ),
         ];
         state.invite_id = "7d2e0c4b-1a9f-4c3e-b8d5-62f0a1e9c7b4".to_string();
@@ -1709,7 +1703,6 @@ mod tests {
             "5b8e2f71-0c4d-4a93-a6e1-9d3f7b20c85e",
             "me",
             &["me", "laptop"],
-            InviteKind::Wallet,
         ));
         shot(&state, "4-waiting");
 
@@ -1718,15 +1711,10 @@ mod tests {
         with_wallet(&mut state);
         state.active_tab = Tab::Sign;
         state.sign_hex = "0x48656c6c6f".to_string();
-        state.invites = vec![invite(
-            "sig-1",
-            "laptop",
-            &["laptop", "me", "phone"],
-            InviteKind::Signing {
-                wallet_id: "9c1f4e2ab37d-ethereum-0".to_string(),
-                message_hex: "48656c6c6f2066726f6d20746865206c6170746f70".to_string(),
-            },
-        )];
+        state.signing_request = Some(peer_request(
+            "9c1f4e2ab37d-ethereum-0",
+            "48656c6c6f2066726f6d20746865206c6170746f70",
+        ));
         state.last_signature = "a3f1c9e2".repeat(16);
         shot(&state, "5-sign");
 
