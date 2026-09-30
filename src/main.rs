@@ -13,6 +13,7 @@
 
 mod core_adapter;
 mod ui_callback;
+mod wallet_view;
 
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -22,9 +23,10 @@ use iced::widget::{
 };
 use iced::{Alignment, Background, Border, Color, Element, Length, Subscription, Task, Theme};
 
-use core_adapter::{CoreAdapter, DEFAULT_THRESHOLD, DEFAULT_TOTAL};
+use core_adapter::{CoreAdapter, DEFAULT_THRESHOLD, DEFAULT_TOTAL, EcdsaSetup};
 use starlab_client::core::{SigningRequest, SigningState};
-use ui_callback::{Invite, UiEvent, WalletView};
+use ui_callback::{Invite, UiEvent};
+use wallet_view::{AccountRow, WalletView, chain_label, signable_chains};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -151,6 +153,10 @@ pub enum Message {
     /// Tab / Shift+Tab: move keyboard focus between inputs.
     FocusNext,
     FocusPrevious,
+
+    /// Once a second while the ECDSA setup or a wallet ceremony is running:
+    /// refresh the safe-prime status.
+    Tick,
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +196,14 @@ impl Config {
     }
 }
 
+/// A signature this device requested.
+#[derive(Debug, Clone)]
+struct SignedMessage {
+    chain: &'static str,
+    message: Vec<u8>,
+    address: String,
+}
+
 pub struct State {
     adapter: Arc<CoreAdapter>,
     device_id: String,
@@ -223,6 +237,13 @@ pub struct State {
     dkg_active: bool,
     dkg_round: u8,
     dkg_progress: f32,
+    /// FROST is done; the wallet's threshold-ECDSA key ceremony runs.
+    dkg_ecdsa_key: bool,
+    /// That ceremony had to wait for this device's safe primes.
+    ecdsa_primes_wait: bool,
+    /// This device's ECDSA safe-prime status (`None`: ed25519 device, no
+    /// ECDSA keys).
+    ecdsa_setup: Option<EcdsaSetup>,
 
     // Signing
     /// The signing manager's request: ours while we sign, or a peer's
@@ -232,6 +253,10 @@ pub struct State {
     sign_hex: String,
     signing_state: SigningState,
     last_signature: String,
+    /// What this device asked to sign, to check the signature it gets back.
+    last_sign: Option<SignedMessage>,
+    /// Ethereum only: whether `last_signature` ecrecovers to the account.
+    signature_check: Option<Result<(), String>>,
 
     // UI
     active_tab: Tab,
@@ -268,6 +293,7 @@ impl State {
             config.curve,
         ));
 
+        let ecdsa_setup = adapter.ecdsa_setup();
         let state = State {
             adapter,
             device_id: config.device_id,
@@ -288,11 +314,16 @@ impl State {
             dkg_active: false,
             dkg_round: 0,
             dkg_progress: 0.0,
+            dkg_ecdsa_key: false,
+            ecdsa_primes_wait: false,
+            ecdsa_setup,
             signing_request: None,
-            sign_chain: starlab_core::accounts::chains_for_curve(signing_curve)[0].0,
+            sign_chain: signable_chains(signing_curve)[0].0,
             sign_hex: String::new(),
             signing_state: SigningState::Idle,
             last_signature: String::new(),
+            last_sign: None,
+            signature_check: None,
             active_tab: Tab::Setup,
             wallet_name: String::new(),
             invite_id: String::new(),
@@ -313,11 +344,16 @@ impl State {
     fn subscription(&self) -> Subscription<Message> {
         // `Subscription::run` identifies the subscription by the worker fn,
         // so it's spawned exactly once for the app's life.
-        Subscription::batch([
+        let mut subscriptions = vec![
             Subscription::run(ui_bridge),
             // Iced doesn't move focus on Tab by itself.
             iced::keyboard::listen().filter_map(tab_focus),
-        ])
+        ];
+        if self.needs_tick() {
+            subscriptions
+                .push(iced::time::every(std::time::Duration::from_secs(1)).map(|_| Message::Tick));
+        }
+        Subscription::batch(subscriptions)
     }
 
     // -- Update ---------------------------------------------------------
@@ -398,7 +434,7 @@ impl State {
                 action(async move { adapter.import_share(password).await })
             }
             Message::ExportShare => {
-                let Some((wallet_id, curve)) = self.export_target() else {
+                let Some((wallet_id, curves)) = self.export_target() else {
                     return Task::none();
                 };
                 if self.export_blocker().is_some() {
@@ -407,8 +443,8 @@ impl State {
                 let adapter = self.adapter.clone();
                 let password = self.passwords.backup.clone();
                 self.pending_action = Some(PendingAction::ExportShare);
-                self.set_status("Exporting the key share");
-                action(async move { adapter.export_share(wallet_id, curve, password).await })
+                self.set_status("Exporting the key shares");
+                action(async move { adapter.export_share(wallet_id, curves, password).await })
             }
 
             Message::WalletNameChanged(v) => {
@@ -479,6 +515,14 @@ impl State {
                 );
                 self.pending_action = Some(PendingAction::Sign);
                 self.last_signature.clear();
+                self.signature_check = None;
+                self.last_sign = self.signing_account().and_then(|account| {
+                    Some(SignedMessage {
+                        chain: account.chain,
+                        message: parse_message_hex(&hex)?,
+                        address: account.address,
+                    })
+                });
                 self.set_status(
                     "Signature requested — approve it on another device of this wallet",
                 );
@@ -510,6 +554,10 @@ impl State {
 
             Message::FocusNext => iced::widget::operation::focus_next(),
             Message::FocusPrevious => iced::widget::operation::focus_previous(),
+            Message::Tick => {
+                self.ecdsa_setup = self.adapter.ecdsa_setup();
+                Task::none()
+            }
 
             Message::ActionDone(result) => {
                 // Create/join only queue a message to the runner; from here on
@@ -552,11 +600,17 @@ impl State {
                 active,
                 round,
                 progress,
+                ecdsa_key,
             } => {
                 self.dkg_active = active;
                 self.dkg_round = round;
                 self.dkg_progress = progress;
+                if !ecdsa_key {
+                    self.ecdsa_primes_wait = false;
+                }
+                self.dkg_ecdsa_key = ecdsa_key;
             }
+            UiEvent::EcdsaWaitingForPrimes => self.ecdsa_primes_wait = true,
             UiEvent::CeremonyOpen(open) => self.ceremony_open = open,
             UiEvent::SigningRequest(request) => self.signing_request = request,
             UiEvent::SigningState(state) => self.signing_state = state,
@@ -565,6 +619,13 @@ impl State {
                 if self.pending_action == Some(PendingAction::CoSign) {
                     self.set_status("Co-signed — the requesting device has the signature");
                 } else {
+                    self.signature_check = self
+                        .last_sign
+                        .as_ref()
+                        .filter(|signed| signed.chain == "ethereum")
+                        .map(|signed| {
+                            check_ethereum_signature(&signed.message, &signature, &signed.address)
+                        });
                     self.last_signature = signature;
                     self.set_status("Signature ready");
                 }
@@ -604,6 +665,14 @@ impl State {
     /// Server or room edited since the last connect (or never connected).
     fn network_changed(&self) -> bool {
         self.connected_url.as_deref() != Some(self.signal_url().as_str())
+    }
+
+    /// The safe-prime status needs refreshing: primes are being prepared,
+    /// or a wallet ceremony may take the ready set.
+    fn needs_tick(&self) -> bool {
+        self.ecdsa_setup.is_some_and(|setup| {
+            setup != EcdsaSetup::Ready || self.ceremony_open || self.dkg_active
+        })
     }
 
     /// Switching rooms mid-setup would strand the ceremony.
@@ -679,28 +748,26 @@ impl State {
         }
     }
 
-    /// `(wallet id, curve)` of the share "Export key share…" writes: the
-    /// selected wallet's key on this device's curve, else its first key.
-    fn export_target(&self) -> Option<(String, String)> {
+    /// `(wallet id, curves)` of the shares "Export key shares…" writes: one
+    /// file per key the selected wallet holds on this device.
+    fn export_target(&self) -> Option<(String, Vec<String>)> {
         let wallet = self.active_wallet()?;
-        let (curve, _) = wallet
-            .keys
-            .iter()
-            .find(|(curve, _)| curve == self.signing_curve)
-            .or_else(|| wallet.keys.first())?;
-        Some((wallet.id.clone(), curve.clone()))
+        let curves: Vec<String> = wallet.curves().map(str::to_string).collect();
+        (!curves.is_empty()).then(|| (wallet.id.clone(), curves))
     }
 
     /// Why "Request signature" is disabled, if it is.
     fn sign_blocker(&self) -> Option<&'static str> {
         if self.signing_wallet_id().is_none() {
-            Some("This wallet has no key for this device's curve.")
+            Some("This wallet has no key for this chain.")
         } else if !self.connected {
             Some("Connect to the network first.")
         } else if self.passwords.unlock.is_empty() {
             Some("Enter the wallet password.")
         } else if self.sign_hex.trim().is_empty() {
             Some("Enter the message to sign.")
+        } else if parse_message_hex(&self.sign_hex).is_none() {
+            Some("The message must be hex bytes.")
         } else {
             None
         }
@@ -723,37 +790,20 @@ impl State {
         self.wallets.get(self.active_wallet_index)
     }
 
-    /// The account wallet signing uses: `<root>-<chain>-<account>`.
-    fn signing_wallet_id(&self) -> Option<String> {
-        let wallet = self.active_wallet()?;
-        wallet
-            .keys
-            .iter()
-            .any(|(curve, _)| curve == self.signing_curve)
-            .then(|| {
-                format!(
-                    "{}-{}-{}",
-                    wallet.id, self.sign_chain, self.selected_account
-                )
-            })
+    /// The selected account on the chosen chain, if the wallet has the key
+    /// that signs for it (Ethereum: threshold ECDSA; Bitcoin: Taproot).
+    fn signing_account(&self) -> Option<AccountRow> {
+        self.active_wallet()?
+            .account(self.sign_chain, self.selected_account)
     }
 
-    /// `(address, derivation path)` of the signing account on the chosen chain.
-    fn signing_address(&self) -> Option<(String, String)> {
+    /// The account wallet signing uses: `<root>-<chain>-<account>`. The
+    /// engine signs `<root>-ethereum-<n>` with the wallet's ECDSA key and
+    /// `<root>-bitcoin-<n>` with its FROST (BIP-340) key.
+    fn signing_wallet_id(&self) -> Option<String> {
         let wallet = self.active_wallet()?;
-        let (_, group_key) = wallet.keys.iter().find(|(c, _)| c == self.signing_curve)?;
-        let group_key = hex::decode(group_key).ok()?;
-        let addresses = starlab_core::accounts::account_addresses(
-            self.signing_curve,
-            &group_key,
-            self.selected_account,
-        )
-        .ok()?;
-        let index = starlab_core::accounts::chains_for_curve(self.signing_curve)
-            .iter()
-            .position(|(key, _)| *key == self.sign_chain)?;
-        let (_, path, address) = addresses.into_iter().nth(index)?;
-        Some((address, path))
+        self.signing_account()
+            .map(|account| format!("{}-{}-{}", wallet.id, account.chain, self.selected_account))
     }
 
     /// "Treasury · Ethereum · Account 0" for an account wallet id.
@@ -767,11 +817,7 @@ impl State {
             .iter()
             .find(|w| w.id == root)
             .map_or(root, |w| w.name.as_str());
-        let chain = starlab_core::accounts::chains_for_curve(self.signing_curve)
-            .iter()
-            .find(|(key, _)| *key == chain)
-            .map_or(chain, |(_, label)| *label);
-        format!("{name} · {chain} · Account {account}")
+        format!("{name} · {} · Account {account}", chain_label(chain))
     }
 
     // -- View -----------------------------------------------------------
@@ -809,6 +855,22 @@ impl State {
         } else {
             ("○", "Offline".to_string(), muted())
         };
+        let mut device = column![
+            row![text(dot).color(color), text(label).size(13).color(color)]
+                .spacing(6)
+                .align_y(Alignment::Center),
+            text(format!("Device {}", self.device_id))
+                .size(12)
+                .color(muted()),
+        ]
+        .spacing(2)
+        .align_x(Alignment::End);
+        if let Some(setup) = self.ecdsa_setup {
+            device = device.push(text(ecdsa_setup_text(setup)).size(12).color(match setup {
+                EcdsaSetup::Ready => muted(),
+                EcdsaSetup::Preparing(_) => warning(),
+            }));
+        }
         row![
             column![
                 text("Starlab Desktop").size(22),
@@ -816,16 +878,7 @@ impl State {
             ]
             .spacing(2),
             Space::new().width(Length::Fill),
-            column![
-                row![text(dot).color(color), text(label).size(13).color(color)]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                text(format!("Device {}", self.device_id))
-                    .size(12)
-                    .color(muted()),
-            ]
-            .spacing(2)
-            .align_x(Alignment::End),
+            device,
         ]
         .align_y(Alignment::Center)
         .into()
@@ -910,26 +963,19 @@ impl State {
                         })
                         .on_press(Message::WalletSelected(i)),
                 );
-                // One line per chain address of the selected account, derived
-                // from the group key via the engine's account model.
-                for (curve, group_key) in &w.keys {
-                    let Ok(group_key) = hex::decode(group_key) else {
-                        continue;
-                    };
-                    let Ok(addresses) = starlab_core::accounts::account_addresses(
-                        curve,
-                        &group_key,
-                        self.selected_account,
-                    ) else {
-                        continue;
-                    };
-                    for (chain, _path, address) in addresses {
-                        entry = entry.push(
-                            text(format!("{chain}  {}", short_addr(&address)))
-                                .size(12)
-                                .color(muted()),
-                        );
-                    }
+                // One line per chain account of the selected account index:
+                // Ethereum from the ECDSA key, Bitcoin from the Taproot key,
+                // Solana / Sui from the ed25519 key.
+                for account in w.accounts(self.selected_account) {
+                    entry = entry.push(
+                        text(format!(
+                            "{}  {}",
+                            account.label,
+                            short_addr(&account.address)
+                        ))
+                        .size(12)
+                        .color(muted()),
+                    );
                 }
                 body = body.push(entry);
             }
@@ -971,7 +1017,7 @@ impl State {
                             .is_none()
                             .then_some(Message::ImportShare)
                     ),
-                    action_button("Export key share…").on_press_maybe(
+                    action_button("Export key shares…").on_press_maybe(
                         self.export_blocker()
                             .is_none()
                             .then_some(Message::ExportShare)
@@ -982,8 +1028,9 @@ impl State {
         body = body.push(match backup {
             Some(reason) => text(reason).size(12).color(warning()).into(),
             None => hint(
-                "Export saves this device's encrypted key share of the selected wallet; \
-                 import restores one.",
+                "Export saves this device's encrypted key shares of the selected wallet to a \
+                 folder, one file per key (Ethereum, Bitcoin, Solana). To restore, import all \
+                 of a wallet's files.",
             ),
         });
 
@@ -1030,7 +1077,15 @@ impl State {
                 s.total
             )
         });
-        let (title, detail) = if self.dkg_active {
+        let (title, detail) = if self.dkg_ecdsa_key {
+            (
+                "Creating the Ethereum key",
+                "The FROST keys are done. The devices now run the threshold-ECDSA key ceremony \
+                 for the wallet's Ethereum account (usually under a minute). Keep every device \
+                 online."
+                    .to_string(),
+            )
+        } else if self.dkg_active {
             (
                 "Generating keys",
                 format!(
@@ -1065,7 +1120,15 @@ impl State {
             text(detail).size(13).color(muted()),
         ]
         .spacing(8);
-        if let Some(invite) = own.filter(|_| !self.dkg_active) {
+        if self.dkg_ecdsa_key && self.ecdsa_primes_wait {
+            body = body.push(
+                text(primes_wait_text(self.ecdsa_setup))
+                    .size(13)
+                    .color(warning()),
+            );
+        }
+        let generating = self.dkg_active || self.dkg_ecdsa_key;
+        if let Some(invite) = own.filter(|_| !generating) {
             body = body.push(
                 row![
                     text("Invite ID").size(12).color(muted()),
@@ -1077,7 +1140,9 @@ impl State {
                 .align_y(Alignment::Center),
             );
         }
-        if self.dkg_active {
+        if self.dkg_ecdsa_key {
+            body = body.push(progress_bar(0.0..=1.0, ECDSA_KEY_PROGRESS));
+        } else if self.dkg_active {
             body = body.push(progress_bar(0.0..=1.0, self.dkg_progress));
         }
         Some(
@@ -1139,10 +1204,18 @@ impl State {
         if let Some(label) = &request.display_label {
             body = body.push(text(label).size(12).color(faint()));
         }
+        let message_label = if request.chain == "ethereum" {
+            "EIP-191 hash (threshold ECDSA)"
+        } else {
+            "Message"
+        };
         body = body.push(
-            text(format!("Message  {}", short_addr(&request.message_hex)))
-                .size(12)
-                .color(faint()),
+            text(format!(
+                "{message_label}  {}",
+                short_addr(&request.message_hex)
+            ))
+            .size(12)
+            .color(faint()),
         );
         let awaiting = !matches!(
             self.signing_state,
@@ -1286,24 +1359,28 @@ impl State {
         };
 
         let mut chains = Row::new().spacing(8);
-        for (key, label) in starlab_core::accounts::chains_for_curve(self.signing_curve) {
+        for (key, label) in signable_chains(self.signing_curve) {
             chains = chains.push(segment_button(
-                *label,
+                label,
                 Message::SignChainSelected(key),
-                *key == self.sign_chain,
+                key == self.sign_chain,
             ));
         }
-        let address: Element<'_, Message> = match self.signing_address() {
-            Some((address, path)) => {
-                row![text(address).size(13), text(path).size(11).color(muted()),]
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .into()
-            }
-            None => hint("This wallet has no key for this device's curve."),
+        let address: Element<'_, Message> = match self.signing_account() {
+            Some(account) => row![
+                text(account.address).size(13),
+                text(account.path).size(11).color(muted()),
+            ]
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .into(),
+            None => hint("This wallet has no key for this chain."),
         };
         let message_hint = match self.sign_chain {
-            "ethereum" => "Hex bytes; signed as an EIP-191 personal message.",
+            "ethereum" => {
+                "Hex bytes; signed with the wallet's threshold-ECDSA key as an EIP-191 \
+                 personal message."
+            }
             "bitcoin" => "The 32-byte BIP-341 sighash, in hex.",
             _ => "Hex bytes to sign.",
         };
@@ -1362,8 +1439,16 @@ impl State {
             );
         }
         if !self.last_signature.is_empty() {
+            let ethereum = self
+                .last_sign
+                .as_ref()
+                .is_some_and(|signed| signed.chain == "ethereum");
             body = body.push(field(
-                "Signature",
+                if ethereum {
+                    "Signature (r ‖ s ‖ v, 65 bytes)"
+                } else {
+                    "Signature"
+                },
                 row![
                     text(&self.last_signature).size(12).width(Length::Fill),
                     action_button("Copy").on_press(Message::CopySignature),
@@ -1371,6 +1456,29 @@ impl State {
                 .spacing(10)
                 .align_y(Alignment::Center),
             ));
+            if ethereum {
+                body = body.push(hint(
+                    "ecrecover-compatible: an EIP-191 personal_sign signature, low-s, \
+                     v = 27 or 28.",
+                ));
+            }
+            match (&self.signature_check, &self.last_sign) {
+                (Some(Ok(())), Some(signed)) => {
+                    body = body.push(
+                        text(format!("Verified: recovers to {}", signed.address))
+                            .size(12)
+                            .color(accent()),
+                    );
+                }
+                (Some(Err(e)), _) => {
+                    body = body.push(
+                        text(format!("Does not verify: {e}"))
+                            .size(12)
+                            .color(danger()),
+                    );
+                }
+                _ => {}
+            }
         }
 
         card("Sign a message", body.into())
@@ -1481,6 +1589,72 @@ fn signing_phase(state: &SigningState) -> &'static str {
         SigningState::Aggregating => "Combining signatures…",
         SigningState::Complete => "Signed.",
         _ => "Waiting for another device of this wallet to approve…",
+    }
+}
+
+/// Progress bar position while the ECDSA key ceremony runs (FROST done).
+const ECDSA_KEY_PROGRESS: f32 = 0.9;
+
+/// "1m 12s" / "45s".
+fn format_elapsed(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {}s", secs / 60, secs % 60)
+    }
+}
+
+/// This device's ECDSA setup, for the header.
+fn ecdsa_setup_text(setup: EcdsaSetup) -> String {
+    match setup {
+        EcdsaSetup::Ready => "ECDSA setup: ready".to_string(),
+        EcdsaSetup::Preparing(elapsed) => format!(
+            "ECDSA setup: preparing safe primes ({}, usually 1-3 min)",
+            format_elapsed(elapsed)
+        ),
+    }
+}
+
+/// Shown while the ECDSA key ceremony had to wait for this device's safe
+/// primes. The engine only says that it waits, not when the wait ends, so
+/// this states what is known.
+fn primes_wait_text(setup: Option<EcdsaSetup>) -> String {
+    match setup {
+        Some(EcdsaSetup::Preparing(elapsed)) => format!(
+            "This device's ECDSA safe primes were not ready when the ceremony began; they \
+             have been preparing for {} (usually 1-3 min). The key ceremony runs as soon as \
+             they are ready.",
+            format_elapsed(elapsed)
+        ),
+        _ => "This device's ECDSA safe primes were not ready when the ceremony began; the key \
+              ceremony runs as soon as they are ready."
+            .to_string(),
+    }
+}
+
+/// The bytes a hex message field holds (`0x` prefix optional), as the
+/// engine decodes them.
+fn parse_message_hex(input: &str) -> Option<Vec<u8>> {
+    hex::decode(input.trim().trim_start_matches("0x")).ok()
+}
+
+/// An Ethereum signature (`r ‖ s ‖ v` hex, `0x` optional) over the EIP-191
+/// hash of `message` must ecrecover to `address`.
+fn check_ethereum_signature(
+    message: &[u8],
+    signature_hex: &str,
+    address: &str,
+) -> Result<(), String> {
+    let signature = hex::decode(signature_hex.trim().trim_start_matches("0x"))
+        .map_err(|e| format!("not hex: {e}"))?;
+    let prehash = starlab_client::utils::eth_helper::eip191_hash(message);
+    let recovered = starlab_core::accounts::recover_ethereum_address(&prehash, &signature)
+        .map_err(|e| e.to_string())?;
+    if recovered.eq_ignore_ascii_case(address) {
+        Ok(())
+    } else {
+        Err(format!("recovers to {recovered}, not {address}"))
     }
 }
 
@@ -1714,6 +1888,7 @@ fn faint() -> Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use starlab_core::accounts::ECDSA_CURVE;
 
     fn invite(id: &str, proposer: &str, participants: &[&str]) -> Invite {
         Invite {
@@ -1797,17 +1972,19 @@ mod tests {
         state.connected_url = Some(state.signal_url());
     }
 
-    /// A 2-of-3 wallet whose group key is the secp256k1 generator — any valid
-    /// point works for address derivation.
+    /// The secp256k1 generator — any valid point works for address derivation.
+    const G: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A 2-of-3 wallet with an ECDSA (Ethereum) and a Taproot (Bitcoin) key.
     fn with_wallet(state: &mut State) {
         state.wallets = vec![WalletView {
             id: "9c1f4e2ab37d".to_string(),
             name: "Treasury".to_string(),
             threshold: "2/3".to_string(),
-            keys: vec![(
-                "secp256k1".to_string(),
-                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string(),
-            )],
+            keys: vec![
+                (ECDSA_CURVE.to_string(), G.to_string()),
+                ("secp256k1".to_string(), G.to_string()),
+            ],
         }];
     }
 
@@ -1937,18 +2114,22 @@ mod tests {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
         state.passwords.backup = "password1".to_string();
-        assert!(clicked(&state, "Export key share…").is_empty());
+        assert!(clicked(&state, "Export key shares…").is_empty());
         with_wallet(&mut state);
         state.passwords.backup = "short".to_string();
-        assert!(clicked(&state, "Export key share…").is_empty());
+        assert!(clicked(&state, "Export key shares…").is_empty());
         state.passwords.backup = "password1".to_string();
         assert!(matches!(
-            clicked(&state, "Export key share…").as_slice(),
+            clicked(&state, "Export key shares…").as_slice(),
             [Message::ExportShare]
         ));
+        // Every key file of the wallet: Ethereum (ECDSA) and Bitcoin (Taproot).
         assert_eq!(
             state.export_target(),
-            Some(("9c1f4e2ab37d".to_string(), "secp256k1".to_string()))
+            Some((
+                "9c1f4e2ab37d".to_string(),
+                vec![ECDSA_CURVE.to_string(), "secp256k1".to_string()]
+            ))
         );
         let _ = std::fs::remove_dir_all(keystore);
     }
@@ -2032,6 +2213,211 @@ mod tests {
         assert_eq!(
             state.signing_wallet_id().as_deref(),
             Some("9c1f4e2ab37d-bitcoin-2")
+        );
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn ethereum_signs_with_the_ecdsa_account() {
+        let (mut state, keystore) = test_state();
+        with_wallet(&mut state);
+        assert_eq!(
+            state.sign_chain, "ethereum",
+            "Ethereum is the default chain"
+        );
+        state.selected_account = 1;
+        assert_eq!(
+            state.signing_wallet_id().as_deref(),
+            Some("9c1f4e2ab37d-ethereum-1")
+        );
+        let account = state.signing_account().unwrap();
+        assert_eq!(account.curve, ECDSA_CURVE);
+        assert_eq!(account.path, "m/44'/60'/0'/0/1");
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn wallet_without_an_ecdsa_key_cannot_sign_ethereum() {
+        let (mut state, keystore) = test_state();
+        with_wallet(&mut state);
+        state.wallets[0]
+            .keys
+            .retain(|(curve, _)| curve == "secp256k1");
+        state.connected = true;
+        state.passwords.unlock = "password1".to_string();
+        state.sign_hex = "00".to_string();
+        assert_eq!(state.signing_wallet_id(), None);
+        assert_eq!(
+            state.sign_blocker(),
+            Some("This wallet has no key for this chain.")
+        );
+        let _ = state.update(Message::SignChainSelected("bitcoin"));
+        assert_eq!(state.sign_blocker(), None);
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn non_hex_message_is_blocked() {
+        let (mut state, keystore) = test_state();
+        with_wallet(&mut state);
+        state.connected = true;
+        state.passwords.unlock = "password1".to_string();
+        state.sign_hex = "hello".to_string();
+        assert_eq!(state.sign_blocker(), Some("The message must be hex bytes."));
+        state.sign_hex = "0x68656c6c6f".to_string();
+        assert_eq!(state.sign_blocker(), None);
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn sidebar_shows_one_row_with_ethereum_and_bitcoin_accounts() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        with_wallet(&mut state);
+        let wallet = &state.wallets[0];
+        let eth = wallet.account("ethereum", 0).unwrap();
+        let btc = wallet.account("bitcoin", 0).unwrap();
+        let mut ui = simulator(state.view());
+        assert!(ui.find("Treasury · 2/3").is_ok());
+        assert!(
+            ui.find(format!("Ethereum  {}", short_addr(&eth.address)).as_str())
+                .is_ok()
+        );
+        assert!(
+            ui.find(format!("Bitcoin  {}", short_addr(&btc.address)).as_str())
+                .is_ok()
+        );
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn ecdsa_key_ceremony_shows_on_the_setup_banner() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        state.ceremony_open = true;
+        state.apply_ui_event(UiEvent::DkgStatus {
+            active: false,
+            round: 0,
+            progress: 0.0,
+            ecdsa_key: true,
+        });
+        assert!(
+            simulator(state.view())
+                .find("Creating the Ethereum key")
+                .is_ok()
+        );
+
+        state.ecdsa_setup = Some(EcdsaSetup::Preparing(std::time::Duration::from_secs(72)));
+        state.apply_ui_event(UiEvent::EcdsaWaitingForPrimes);
+        let wait = primes_wait_text(state.ecdsa_setup);
+        assert!(wait.contains("1m 12s"), "{wait}");
+        assert!(simulator(state.view()).find(wait.as_str()).is_ok());
+
+        // The ceremony ending clears the wait.
+        state.apply_ui_event(UiEvent::DkgStatus {
+            active: false,
+            round: 0,
+            progress: 0.0,
+            ecdsa_key: false,
+        });
+        assert!(!state.ecdsa_primes_wait);
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn header_shows_the_ecdsa_setup() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        assert!(
+            state.ecdsa_setup.is_some(),
+            "the secp256k1 device prepares ECDSA primes"
+        );
+        state.ecdsa_setup = Some(EcdsaSetup::Ready);
+        assert!(simulator(state.view()).find("ECDSA setup: ready").is_ok());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[test]
+    fn ecdsa_setup_status_text() {
+        use std::time::Duration;
+        assert_eq!(ecdsa_setup_text(EcdsaSetup::Ready), "ECDSA setup: ready");
+        assert_eq!(
+            ecdsa_setup_text(EcdsaSetup::Preparing(Duration::from_secs(72))),
+            "ECDSA setup: preparing safe primes (1m 12s, usually 1-3 min)"
+        );
+        assert_eq!(
+            ecdsa_setup_text(EcdsaSetup::Preparing(Duration::from_secs(45))),
+            "ECDSA setup: preparing safe primes (45s, usually 1-3 min)"
+        );
+    }
+
+    #[tokio::test]
+    async fn setup_status_ticks_only_while_something_can_change() {
+        use std::time::Duration;
+        let (mut state, keystore) = test_state();
+        state.ecdsa_setup = Some(EcdsaSetup::Preparing(Duration::from_secs(3)));
+        assert!(state.needs_tick());
+        state.ecdsa_setup = Some(EcdsaSetup::Ready);
+        assert!(!state.needs_tick());
+        state.ceremony_open = true;
+        assert!(state.needs_tick(), "a DKG may take the ready primes");
+        state.ecdsa_setup = None;
+        assert!(!state.needs_tick(), "no ECDSA on an ed25519 device");
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    /// `r ‖ s ‖ v` (v = 27 + recovery id) over the EIP-191 hash of
+    /// `message`, by the key 1 — address 0x7e5f…5bdf.
+    fn personal_sign_with_key_1(message: &[u8]) -> String {
+        let key =
+            k256::ecdsa::SigningKey::from_slice(&[[0u8; 31].as_slice(), &[1]].concat()).unwrap();
+        let prehash = starlab_client::utils::eth_helper::eip191_hash(message);
+        let (signature, recovery_id) = key.sign_prehash_recoverable(&prehash);
+        let mut bytes = signature.to_bytes().to_vec();
+        bytes.push(27 + recovery_id.to_byte());
+        format!("0x{}", hex::encode(bytes))
+    }
+
+    const KEY_1_ADDRESS: &str = "0x7e5f4552091a69125d5dfcb7b8c2659029395bdf";
+
+    #[test]
+    fn ethereum_signature_recovers_to_its_account() {
+        let signature = personal_sign_with_key_1(b"hello");
+        assert_eq!(
+            check_ethereum_signature(b"hello", &signature, KEY_1_ADDRESS),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn ethereum_signature_over_another_message_is_rejected() {
+        let signature = personal_sign_with_key_1(b"hello");
+        assert!(check_ethereum_signature(b"bye", &signature, KEY_1_ADDRESS).is_err());
+    }
+
+    #[test]
+    fn a_64_byte_signature_is_not_an_ethereum_signature() {
+        assert!(check_ethereum_signature(b"hello", &"ab".repeat(64), KEY_1_ADDRESS).is_err());
+    }
+
+    #[tokio::test]
+    async fn own_ethereum_signature_is_verified_and_labelled() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Sign;
+        state.last_sign = Some(SignedMessage {
+            chain: "ethereum",
+            message: b"hello".to_vec(),
+            address: KEY_1_ADDRESS.to_string(),
+        });
+        with_wallet(&mut state);
+        state.apply_ui_event(UiEvent::SigningComplete(personal_sign_with_key_1(b"hello")));
+        assert_eq!(state.signature_check, Some(Ok(())));
+        let mut ui = simulator(state.view());
+        assert!(ui.find("Signature (r ‖ s ‖ v, 65 bytes)").is_ok());
+        assert!(
+            ui.find(format!("Verified: recovers to {KEY_1_ADDRESS}").as_str())
+                .is_ok()
         );
         let _ = std::fs::remove_dir_all(keystore);
     }
