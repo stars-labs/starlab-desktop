@@ -719,6 +719,9 @@ impl State {
             Some("Enter the wallet password.")
         } else if self.sign_hex.trim().is_empty() {
             Some("Enter the message to sign.")
+        } else if hex::decode(self.sign_hex.trim().trim_start_matches("0x")).is_err() {
+            // The engine would reject it only after the ceremony times out.
+            Some("The message must be hex bytes.")
         } else {
             None
         }
@@ -2200,6 +2203,20 @@ mod tests {
             device_chains("secp256k1"),
             vec![("ethereum", "Ethereum"), ("bitcoin", "Bitcoin")]
         );
+    }
+
+    #[tokio::test]
+    async fn non_hex_message_is_blocked_before_signing() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        connected(&mut state);
+        with_wallet(&mut state);
+        state.passwords.unlock = "pw".to_string();
+        state.sign_hex = "hello".to_string();
+        assert_eq!(state.sign_blocker(), Some("The message must be hex bytes."));
+        state.sign_hex = "0x48656c6c6f".to_string();
+        assert_eq!(state.sign_blocker(), None);
+        let _ = std::fs::remove_dir_all(keystore);
     }
 
     #[tokio::test]
