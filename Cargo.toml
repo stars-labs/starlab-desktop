@@ -16,12 +16,12 @@ iced = { version = "0.14", features = ["tokio"] }
 # (WalletManager, SessionManager, DkgManager, OfflineManager,
 # ConnectionManager, SigningManager, CoreState) + HeadlessRunner — consumed
 # from the engine repo as a git dependency. Pin to a tag/rev for releases.
-starlab-client = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }
+starlab-client = { git = "https://github.com/stars-labs/starlab-mpc", branch = "feat/ecdsa-cggmp24" }
 
 # The account model (BIP-44 paths + public-only per-account address
 # derivation) — single source of truth shared by every client. Used directly
 # by the view layer so switching accounts is a pure local re-derivation.
-starlab-core = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }
+starlab-core = { git = "https://github.com/stars-labs/starlab-mpc", branch = "feat/ecdsa-cggmp24" }
 
 hex = "0.4.3"
 uuid = { version = "1.26.1", features = ["v4"] }
@@ -60,5 +60,32 @@ path = "src/main.rs"
 # Headless UI tests: simulate clicks and render snapshots without a window.
 iced_test = "0.14"
 serde_json = "1.0.151"
+# Sign test messages with a known key to check the ecrecover verification.
+k256 = { version = "0.14.0", features = ["ecdsa"] }
 # In-process signal server for the end-to-end create → sign test.
-starlab-signal-server = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }
+starlab-signal-server = { git = "https://github.com/stars-labs/starlab-mpc", branch = "feat/ecdsa-cggmp24" }
+
+# The engine's threshold ECDSA (cggmp24) is big-integer heavy (Paillier + ZK
+# proofs): unoptimized, a debug build's wallet setup and the e2e test take
+# 10-50x longer. Optimize just that arithmetic stack in dev/test builds (same
+# list as the engine's workspace).
+[profile.dev.package.num-bigint]
+opt-level = 3
+[profile.dev.package.num-integer]
+opt-level = 3
+[profile.dev.package.fast-paillier]
+opt-level = 3
+[profile.dev.package.paillier-zk]
+opt-level = 3
+[profile.dev.package.cggmp24]
+opt-level = 3
+[profile.dev.package.cggmp24-keygen]
+opt-level = 3
+[profile.dev.package.generic-ec]
+opt-level = 3
+[profile.dev.package.generic-ec-curves]
+opt-level = 3
+[profile.dev.package.k256]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3

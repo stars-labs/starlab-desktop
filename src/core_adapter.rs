@@ -14,11 +14,12 @@ use starlab_client::core::{
 use starlab_client::elm::headless::HeadlessRunner;
 use starlab_client::elm::model::{WalletConfig, WalletMode};
 use starlab_client::elm::{Message, Model};
+use starlab_client::protocal::ecdsa::PrimeSupply;
 use starlab_client::protocal::signal::{SessionInfo as SignalSession, SessionType};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc::UnboundedSender};
 
-use crate::ui_callback::{Invite, NativeUICallback, UiEvent};
+use crate::ui_callback::{EcdsaSetup, Invite, NativeUICallback, UiEvent};
 
 /// Shape of every wallet the desktop creates: 2-of-3. The UI states this so
 /// users know how many devices to bring.
@@ -63,6 +64,26 @@ where
     }
 }
 
+/// The share files at `path`: the file itself, or every `.json` in a folder
+/// (sorted, so imports run in a stable order).
+fn share_files(path: &str) -> Result<Vec<String>, String> {
+    let p = std::path::Path::new(path);
+    if !p.is_dir() {
+        return Ok(vec![path.to_string()]);
+    }
+    let mut files: Vec<String> = std::fs::read_dir(p)
+        .map_err(|e| format!("cannot read {path}: {e}"))?
+        .filter_map(|entry| entry.ok().map(|e| e.path()))
+        .filter(|f| f.extension().is_some_and(|ext| ext == "json"))
+        .map(|f| f.to_string_lossy().into_owned())
+        .collect();
+    files.sort();
+    if files.is_empty() {
+        return Err(format!("no .json key-share files in {path}"));
+    }
+    Ok(files)
+}
+
 /// Peers whose WebRTC data channel to this device is open.
 fn connected_peers(model: &Model) -> usize {
     model
@@ -91,21 +112,27 @@ impl RunnerControl {
     }
 }
 
+/// Spawn the secp256k1 runner. Its wallets carry an Ethereum key made with
+/// threshold ECDSA, which needs Paillier safe primes: `primes` (real ones,
+/// generated in the background, unless a test injects fixed ones) starts
+/// generating now so they're ready by the time a wallet is set up.
 fn spawn_secp256k1_runner<F>(
     device_id: String,
     keystore_path: String,
     signal_url: String,
+    primes: PrimeSupply,
     on_sync: F,
 ) -> (UnboundedSender<Message>, RunnerControl)
 where
     F: Fn(&Model, Option<&Message>) + Send + 'static,
 {
-    let app_state = Arc::new(Mutex::new(
-        AppState::<frost_secp256k1_tr::Secp256K1Sha256TR>::with_device_id_and_server(
-            device_id.clone(),
-            signal_url,
-        ),
-    ));
+    let mut state = AppState::<frost_secp256k1_tr::Secp256K1Sha256TR>::with_device_id_and_server(
+        device_id.clone(),
+        signal_url,
+    );
+    primes.start();
+    state.ecdsa.primes = primes;
+    let app_state = Arc::new(Mutex::new(state));
     let runner = HeadlessRunner::<frost_secp256k1_tr::Secp256K1Sha256TR>::new(
         device_id,
         keystore_path,
@@ -182,6 +209,64 @@ fn rich_wallets(model: &Model) -> Vec<crate::ui_callback::WalletView> {
     by_id.into_values().collect()
 }
 
+/// The FROST part of the running wallet setup is done (`Complete`) but the
+/// wallet isn't finalized yet: the Ethereum (ECDSA) key is being made. The
+/// engine clears `creating_wallet` / `joining_session` only on finalize.
+fn ecdsa_keygen_running(model: &Model) -> bool {
+    ceremony_open(model)
+        && matches!(
+            model.wallet_state.dkg_round,
+            starlab_client::elm::message::DKGRound::Complete
+        )
+}
+
+/// Tracks how long the prime generator has been working: it starts at
+/// launch and again after each wallet setup takes a set.
+struct PrimeWatch {
+    supply: PrimeSupply,
+    since: std::time::Instant,
+    was_ready: bool,
+}
+
+impl PrimeWatch {
+    fn new(supply: PrimeSupply) -> Self {
+        Self {
+            was_ready: supply.is_ready(),
+            supply,
+            since: std::time::Instant::now(),
+        }
+    }
+
+    fn status(&mut self) -> EcdsaSetup {
+        let ready = self.supply.is_ready();
+        if self.was_ready && !ready {
+            self.since = std::time::Instant::now(); // a setup took the set
+        }
+        self.was_ready = ready;
+        if ready {
+            EcdsaSetup::Ready
+        } else {
+            EcdsaSetup::Preparing {
+                elapsed_secs: self.since.elapsed().as_secs(),
+            }
+        }
+    }
+}
+
+/// Push this device's ECDSA setup state to the UI once a second.
+fn spawn_prime_status(supply: PrimeSupply, ui_tx: UnboundedSender<UiEvent>) {
+    tokio::spawn(async move {
+        let mut watch = PrimeWatch::new(supply);
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
+        loop {
+            tick.tick().await;
+            if ui_tx.send(UiEvent::EcdsaSetup(watch.status())).is_err() {
+                return; // app closed
+            }
+        }
+    });
+}
+
 /// A new-wallet invite; signing and reshare sessions aren't invites.
 fn invite(session: &SignalSession) -> Option<Invite> {
     (session.session_type == SessionType::DKG).then(|| Invite {
@@ -224,12 +309,34 @@ impl CoreAdapter {
         signal_url: String,
         curve: String,
     ) -> Self {
+        Self::with_primes(
+            ui_tx,
+            device_id,
+            keystore_path,
+            signal_url,
+            curve,
+            PrimeSupply::background(),
+        )
+    }
+
+    /// [`Self::new`] with an explicit source of ECDSA safe primes — tests
+    /// inject `PrimeSupply::insecure_test_fixed` so a wallet setup doesn't
+    /// spend minutes generating them.
+    fn with_primes(
+        ui_tx: UnboundedSender<UiEvent>,
+        device_id: String,
+        keystore_path: String,
+        signal_url: String,
+        curve: String,
+        primes: PrimeSupply,
+    ) -> Self {
         let ui_callback: Arc<dyn UICallback> = Arc::new(NativeUICallback::new(ui_tx.clone()));
 
         // The signing backend and manager need runner_tx, so they're built
         // after the spawn and reach on_sync through a late-bound slot.
         let signing_slot: SigningSlot = Arc::new(std::sync::Mutex::new(None));
         let signing_for_sync = signing_slot.clone();
+        let ui_tx_for_primes = ui_tx.clone();
 
         // on_sync: mirror the runner's model into the UI after every message.
         let on_sync = move |model: &Model, msg: Option<&Message>| {
@@ -259,6 +366,7 @@ impl CoreAdapter {
                 UiEvent::Invites(model.session_invites.iter().filter_map(invite).collect()),
                 UiEvent::ActiveSession(model.active_session.as_ref().and_then(invite)),
                 UiEvent::CeremonyOpen(ceremony_open(model)),
+                UiEvent::EcdsaKeygen(ecdsa_keygen_running(model)),
                 UiEvent::DkgStatus {
                     active,
                     round,
@@ -275,10 +383,13 @@ impl CoreAdapter {
                 .with_keystore(keystore_path.clone(), device_id.clone()),
         );
         let (runner_tx, runner_control) = if curve == "ed25519" {
+            let _ = ui_tx_for_primes.send(UiEvent::EcdsaSetup(EcdsaSetup::NotNeeded));
             spawn_ed25519_runner(device_id, keystore_path, signal_url, on_sync)
         } else {
-            // "unified" and "secp256k1" both run on the secp256k1 runner.
-            spawn_secp256k1_runner(device_id, keystore_path, signal_url, on_sync)
+            // "unified" and "secp256k1" both run on the secp256k1 runner;
+            // their wallets get the threshold-ECDSA Ethereum key.
+            spawn_prime_status(primes.clone(), ui_tx_for_primes);
+            spawn_secp256k1_runner(device_id, keystore_path, signal_url, primes, on_sync)
         };
         // Unified mode = one ceremony → both curves (ETH+BTC + SOL+Sui in one
         // wallet). Flip the model into unified mode like the CLI's `--curve unified`.
@@ -347,22 +458,51 @@ impl CoreAdapter {
             .map_err(|e| e.to_string())
     }
 
-    /// Import an exported key-share file (encrypted with `password`) into this
+    /// Import exported key-share files (encrypted with `password`) into this
     /// device's keystore; the runner then re-reads the keystore so the wallet
-    /// shows up. The file comes from `MPC_IMPORT_PATH` when set, else from a
-    /// native file picker. A cancelled picker is not an error.
+    /// shows up. A wallet has one file per key (a secp256k1 wallet: Taproot +
+    /// ECDSA), so the picker takes several files, and `MPC_IMPORT_PATH` may
+    /// name a file or a folder (every `.json` in it). A cancelled picker is
+    /// not an error.
     pub async fn import_share(&self, password: String) -> Result<(), String> {
-        let Some(path) = pick_path(env_path(IMPORT_PATH_ENV), IMPORT_PATH_ENV, || {
-            rfd::FileDialog::new()
-                .add_filter("Starlab key share", &["json"])
-                .set_title("Import wallet key share")
-                .pick_file()
-        })
-        .await?
-        else {
-            return Ok(());
+        let paths = match env_path(IMPORT_PATH_ENV) {
+            Some(path) => share_files(&path)?,
+            None => {
+                let picked = tokio::time::timeout(
+                    DIALOG_TIMEOUT,
+                    tokio::task::spawn_blocking(|| {
+                        rfd::FileDialog::new()
+                            .add_filter("Starlab key share", &["json"])
+                            .set_title("Import wallet key shares")
+                            .pick_files()
+                    }),
+                )
+                .await;
+                match picked {
+                    Ok(Ok(Some(files))) => files
+                        .into_iter()
+                        .map(|p| p.to_string_lossy().into_owned())
+                        .collect(),
+                    Ok(Ok(None)) => return Ok(()),
+                    Ok(Err(e)) => {
+                        return Err(format!(
+                            "The file dialog failed ({e}). Set {IMPORT_PATH_ENV} to a file or \
+                             folder instead."
+                        ));
+                    }
+                    Err(_) => {
+                        return Err(format!(
+                            "The file dialog did not open (no desktop file portal?). Set \
+                             {IMPORT_PATH_ENV} to a file or folder instead."
+                        ));
+                    }
+                }
+            }
         };
-        self.import_share_file(path, password).await
+        for path in paths {
+            self.import_share_file(path, password.clone()).await?;
+        }
+        Ok(())
     }
 
     async fn import_share_file(&self, path: String, password: String) -> Result<(), String> {
@@ -374,29 +514,37 @@ impl CoreAdapter {
         Ok(())
     }
 
-    /// Export this device's key share of `wallet_id` on `curve`, still
-    /// encrypted with the wallet `password`. The target comes from
-    /// `MPC_EXPORT_PATH` when set, else from a native save dialog.
-    pub async fn export_share(
+    /// Export this device's key shares of `wallet_id` — one file per key in
+    /// `curves`, `<wallet_id>-<curve>.json`, still encrypted with the wallet
+    /// `password` — into a folder: `MPC_EXPORT_PATH` when set, else one
+    /// picked in a native folder dialog.
+    pub async fn export_shares(
         &self,
         wallet_id: String,
-        curve: String,
+        curves: Vec<String>,
         password: String,
     ) -> Result<(), String> {
-        let file_name = format!("{wallet_id}-{curve}.json");
-        let Some(path) = pick_path(env_path(EXPORT_PATH_ENV), EXPORT_PATH_ENV, move || {
+        let Some(dir) = pick_path(env_path(EXPORT_PATH_ENV), EXPORT_PATH_ENV, || {
             rfd::FileDialog::new()
-                .add_filter("Starlab key share", &["json"])
-                .set_title("Export wallet key share")
-                .set_file_name(file_name)
-                .save_file()
+                .set_title("Export wallet key shares to a folder")
+                .pick_folder()
         })
         .await?
         else {
             return Ok(());
         };
-        self.export_share_file(&wallet_id, &curve, path, password)
-            .await
+        std::fs::create_dir_all(&dir).map_err(|e| format!("cannot create {dir}: {e}"))?;
+        for curve in &curves {
+            let path = std::path::Path::new(&dir).join(format!("{wallet_id}-{curve}.json"));
+            self.export_share_file(
+                &wallet_id,
+                curve,
+                path.to_string_lossy().into_owned(),
+                password.clone(),
+            )
+            .await?;
+        }
+        Ok(())
     }
 
     async fn export_share_file(
@@ -487,6 +635,7 @@ mod tests {
             "test-device".to_string(),
             keystore.to_string_lossy().into_owned(),
             "ws://127.0.0.1:9".to_string(),
+            insecure_test_primes(0),
             move |model: &Model, _| {
                 let _ = flag_tx.send(ceremony_open(model));
             },
@@ -499,6 +648,98 @@ mod tests {
             .await
             .unwrap_or_else(|_| panic!("ceremony_open never became {want}"))
             .expect("runner dropped");
+    }
+
+    /// **INSECURE, tests only**: the published fixture primes (one set per
+    /// device) so a wallet setup doesn't spend minutes generating them.
+    fn insecure_test_primes(device: usize) -> PrimeSupply {
+        let sets: Vec<starlab_core::ecdsa::Primes> =
+            serde_json::from_str(include_str!("../testdata/insecure-test-primes.json"))
+                .expect("fixture primes");
+        PrimeSupply::insecure_test_fixed(sets[device % sets.len()].clone())
+    }
+
+    fn entry(id: &str, curve: &str) -> starlab_client::keystore::WalletMetadata {
+        starlab_client::keystore::WalletMetadata::new(
+            id.to_string(),
+            "d".to_string(),
+            curve.to_string(),
+            2,
+            3,
+            1,
+            format!("{curve}-key"),
+        )
+    }
+
+    #[test]
+    fn every_key_file_of_a_wallet_is_one_row() {
+        let mut model = Model::new("d".to_string());
+        model.wallet_state.wallets = vec![
+            entry("w1", "secp256k1"),
+            entry("w1", "secp256k1-ecdsa"),
+            entry("w1", "ed25519"),
+        ];
+        let rows = rich_wallets(&model);
+        assert_eq!(rows.len(), 1);
+        let curves: Vec<&str> = rows[0].keys.iter().map(|(c, _)| c.as_str()).collect();
+        assert_eq!(curves, ["secp256k1", "secp256k1-ecdsa", "ed25519"]);
+    }
+
+    #[test]
+    fn ed25519_only_and_two_wallets_group_by_id() {
+        let mut model = Model::new("d".to_string());
+        model.wallet_state.wallets = vec![
+            entry("b", "secp256k1"),
+            entry("a", "ed25519"),
+            entry("b", "secp256k1-ecdsa"),
+        ];
+        let rows = rich_wallets(&model);
+        assert_eq!(rows.len(), 2);
+        let a = rows.iter().find(|w| w.id == "a").unwrap();
+        assert_eq!(a.keys.len(), 1, "ed25519-only wallet");
+        let b = rows.iter().find(|w| w.id == "b").unwrap();
+        assert_eq!(b.keys.len(), 2, "Taproot + ECDSA");
+    }
+
+    #[test]
+    fn ecdsa_setup_text() {
+        assert_eq!(
+            EcdsaSetup::Preparing { elapsed_secs: 9 }
+                .describe()
+                .as_deref(),
+            Some("ECDSA setup: preparing safe primes (9s so far, usually 1-5 min)")
+        );
+        assert_eq!(
+            EcdsaSetup::Ready.describe().as_deref(),
+            Some("ECDSA setup: ready")
+        );
+        assert_eq!(EcdsaSetup::NotNeeded.describe(), None);
+    }
+
+    #[test]
+    fn prime_watch_restarts_the_clock_when_a_setup_takes_the_primes() {
+        let fixed = insecure_test_primes(0);
+        let mut watch = PrimeWatch::new(fixed);
+        assert_eq!(watch.status(), EcdsaSetup::Ready);
+
+        let background = PrimeSupply::background();
+        let mut watch = PrimeWatch::new(background);
+        assert_eq!(
+            watch.status(),
+            EcdsaSetup::Preparing { elapsed_secs: 0 },
+            "not started → still to prepare"
+        );
+    }
+
+    #[test]
+    fn ecdsa_keygen_runs_between_frost_complete_and_finalize() {
+        let mut model = Model::new("d".to_string());
+        model.wallet_state.joining_session = Some("s".to_string());
+        assert!(!ecdsa_keygen_running(&model), "FROST rounds still running");
+        model.wallet_state.dkg_round = starlab_client::elm::message::DKGRound::Complete;
+        assert!(ecdsa_keygen_running(&model));
+        model.wallet_state.joining_session = None; // finalized
+        assert!(!ecdsa_keygen_running(&model));
     }
 
     /// Consume `rx` until an event matches `pick`; panics after 90s.
@@ -539,12 +780,13 @@ mod tests {
             let keystore =
                 std::env::temp_dir().join(format!("starlab-e2e-{}", uuid::Uuid::new_v4()));
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            let adapter = CoreAdapter::new(
+            let adapter = CoreAdapter::with_primes(
                 tx,
                 format!("device-{i}"),
                 keystore.to_string_lossy().into_owned(),
                 url.clone(),
                 "secp256k1".to_string(),
+                insecure_test_primes(i),
             );
             adapter.connect_websocket(url.clone()).await.unwrap();
             next_match(&mut rx, "connection", |e| {
@@ -574,14 +816,33 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let mut wallet_id = String::new();
+        // The wallet is listed once FROST AND the ECDSA (Ethereum) key are
+        // done: one row holding the Taproot and the ECDSA key.
+        let mut wallet = None;
         for (_, rx, _, _) in devices.iter_mut() {
-            wallet_id = next_match(rx, "finished wallet", |e| match e {
-                UiEvent::Wallets(wallets) => wallets.first().map(|w| w.id.clone()),
-                _ => None,
-            })
-            .await;
+            wallet = Some(
+                next_match(rx, "finished wallet", |e| match e {
+                    UiEvent::Wallets(wallets) => wallets
+                        .first()
+                        .filter(|w| w.keys.iter().any(|(c, _)| c == "secp256k1-ecdsa"))
+                        .cloned(),
+                    _ => None,
+                })
+                .await,
+            );
         }
+        let wallet = wallet.expect("three devices");
+        let wallet_id = wallet.id.clone();
+        let ecdsa_key = wallet
+            .keys
+            .iter()
+            .find(|(c, _)| c == "secp256k1-ecdsa")
+            .map(|(_, k)| hex::decode(k).unwrap())
+            .unwrap();
+        let account1 = starlab_core::accounts::account_addresses("secp256k1-ecdsa", &ecdsa_key, 1)
+            .unwrap()
+            .remove(0)
+            .2;
 
         // Device 0 signs with account 1 on Ethereum; device 1 approves.
         let (signer, mut signer_rx, signer_keystore, signer_password) = devices.remove(0);
@@ -613,7 +874,15 @@ mod tests {
             _ => None,
         })
         .await;
-        assert!(!signature.is_empty());
+        // Threshold ECDSA: 65-byte r ‖ s ‖ v that ecrecovers (EIP-191 hash
+        // of "Hello") to Ethereum account 1 of the wallet.
+        let signature = hex::decode(signature.trim_start_matches("0x")).unwrap();
+        assert_eq!(signature.len(), 65);
+        let prehash = starlab_client::utils::eth_helper::eip191_hash(b"Hello");
+        assert_eq!(
+            starlab_core::accounts::recover_ethereum_address(&prehash, &signature).unwrap(),
+            account1
+        );
 
         // Device 1 exports its share; a fresh install (same device id, empty
         // keystore) imports it and lists the wallet.

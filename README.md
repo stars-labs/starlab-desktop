@@ -1,10 +1,13 @@
 # Starlab Desktop
 
 Native desktop **MPC wallet** — an [Iced](https://iced.rs) GUI (MIT) over the
-[`starlab-mpc`](https://github.com/stars-labs/starlab-mpc) FROST threshold-signing
-engine. Create and use a multi-device wallet whose key is split across devices
-(FROST DKG + threshold signing over a WebRTC mesh); no single device ever holds
-the whole key.
+[`starlab-mpc`](https://github.com/stars-labs/starlab-mpc) threshold-signing
+engine. Create and use a multi-device wallet whose keys are split across
+devices (DKG + threshold signing over a WebRTC mesh); no single device ever
+holds a whole key. A wallet has a threshold-ECDSA key (cggmp24) for its
+Ethereum accounts — signatures are standard `r ‖ s ‖ v`, `ecrecover`-compatible
+— and FROST keys for Bitcoin (Taproot, BIP-340) and, on an ed25519 device,
+Solana / Sui.
 
 It reuses `starlab-mpc`'s `starlab-client` library (the Elm core + `core::*Manager` +
 `HeadlessRunner`) as its business-logic backend — same real DKG / signing /
@@ -47,9 +50,15 @@ view(&State)->Element<Message>  <->  update(&mut State, Message)  <->  core_adap
 Every flow runs on the real engine: connect, create or join a 2-of-3 wallet
 (DKG), cancel a setup (withdraws the invite), sign with any account and chain,
 approve or reject a peer's signature request, and export / import this
-device's encrypted key share (`MPC_EXPORT_PATH` / `MPC_IMPORT_PATH` skip the
-file dialog on machines without a desktop file portal). The SD-card air-gap
-is not exposed.
+device's encrypted key shares — one file per key, `<wallet>-<curve>.json`
+(`MPC_EXPORT_PATH` = a folder, `MPC_IMPORT_PATH` = a file or a folder; both
+skip the file dialog on machines without a desktop file portal). The SD-card
+air-gap is not exposed.
+
+The Ethereum key needs Paillier safe primes, which take minutes of CPU: the
+app generates them in the background from launch and shows "ECDSA setup:
+preparing safe primes (…)" / "ready" in the sidebar. A wallet setup started
+before they are ready waits for them (the setup banner says so).
 
 ```bash
 cargo test                             # unit + headless UI tests (iced_test)
@@ -59,5 +68,6 @@ SNAPSHOT_DIR=/tmp/shots cargo test snapshots   # render the main screens to PNG
 
 ## Dependency note
 
-`starlab-client` is pinned to `starlab-mpc` `main` (a git dependency). For releases,
-pin it to a tag or rev.
+`starlab-client` is a git dependency on `starlab-mpc`. While threshold ECDSA is
+being integrated it tracks the `feat/ecdsa-cggmp24` branch; it goes back to
+`main` when that branch merges. For releases, pin it to a tag or rev.
