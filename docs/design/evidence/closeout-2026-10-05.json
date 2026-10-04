@@ -1,0 +1,133 @@
+{
+  "source": "550dbd48fe8d20637f752aa1dcfd47dd12e12521",
+  "engine_git_rev": "031e81f3177a839eebdd7dfa48e8710e2d999222",
+  "release": {
+    "path": "/home/freeman.xiong/Documents/github/stars-labs/starlab-desktop/target/release/starlab-desktop",
+    "sha256": "3aac54bc9b4c7ac5c75fc698ef5973d63f0d5b40b610fb1704eac4dabdbb6ba3"
+  },
+  "checks": {
+    "tests": {
+      "passed": 50,
+      "failed": 0,
+      "ignored": 1
+    },
+    "fmt": "passed",
+    "strict_all_target_clippy": "passed",
+    "locked_release": "passed;310 seconds",
+    "actionlint": "passed;remote workflow triggered by push, result not yet claimed"
+  },
+  "native": {
+    "backend": "tiny-skia",
+    "display": ":165",
+    "viewports": [
+      [
+        1440,
+        900
+      ],
+      [
+        1024,
+        768
+      ]
+    ],
+    "actions": "hover, press, focus, keyboard Tab, eight repeated navigation/focus loops, resize normal-to-narrow, exhausted connection failure, same-server retry",
+    "scope": "isolated blank keystore; localhost refused signal URL; no card, new wallet or chain transaction",
+    "review": "no shadow trails or clipping in inspected native navigation/setup/focus/error screenshots"
+  },
+  "cache_scope": "Cache configuration requires a DKG password. Readonly desktop startup is uncached; engine cache/lease fixture regressions are separate proof, no new warm-cache native claim.",
+  "logs": [
+    "/tmp/starlab-desktop-closeout-pinned-tests.log",
+    "/tmp/starlab-desktop-closeout-pinned-clippy.log",
+    "/tmp/starlab-desktop-closeout-pinned-fmt.log",
+    "/tmp/starlab-desktop-closeout-pinned-release.log",
+    "/tmp/starlab-desktop-closeout-pinned-native.log"
+  ],
+  "screenshots": [
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/02-secondary-hover.png",
+      "sha256": "fa45a99f781ef99515906988d9952e64e0c029db95b500ecc10609e8cda2eac7"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/03-secondary-pressed.png",
+      "sha256": "22c4645c5bbf8c7bf3dd28a9c5ced6541080623bd3ff9fd5f78929bcbfd521e8"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/04-keyboard-input-focus.png",
+      "sha256": "37215392e6bd1a981bb4b0077fce378e46aac5ad55968fc9930a6800133e251c"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/05-navigation.png",
+      "sha256": "cdacab9f048431417e48ffe39309f1f635156d02fa5a75a3770829eb9709da01"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/06-normal-connection.png",
+      "sha256": "84de304ff49f3541b9dac72f3fae7705f99e0292f0379844fa186d5b4a24e9f2"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/07-normal-setup.png",
+      "sha256": "6306d0f898573a09ddcb121c7532930f1e283bf03103d6e91c025da10dba5b1e"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/08-narrow-keyboard-focus.png",
+      "sha256": "1f4f025bd4e35736decfdac72c8820bee7a26e796afe9a949625f65361a90e2c"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/09-narrow-activity.png",
+      "sha256": "98356b2a09cd5645cda58c8bf165a7f3e9508097cc0148cf25d2bb431ff2aabb"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/10-terminal-failure.png",
+      "sha256": "b9de23acf66c9e189a92292ef2b52b63f26febaa60406a8dae22f14162b865d0"
+    },
+    {
+      "file": "/tmp/starlab-desktop-closeout-pinned-native-shots/11-same-server-retry.png",
+      "sha256": "a84b7948dd7a06536d2e55b0f58782c24b13a3d3eb25507d0758d55b9f56fed0"
+    }
+  ],
+  "source_inputs": [
+    {
+      "file": "Cargo.toml",
+      "sha256": "a99f96aab062d852671349a546c311a5a8e699901738fb54f4d18f3e62918d07"
+    },
+    {
+      "file": "Cargo.lock",
+      "sha256": "ec12298b1dca67fd1ea05c349413bc752badd957e8d0fb9a4abf453f9f2a3076"
+    },
+    {
+      "file": "src/core_adapter.rs",
+      "sha256": "321c587a4e0f794642b092534eb1f0a84d7c2275fab4ae40dbd837a99d12f735"
+    },
+    {
+      "file": "src/main.rs",
+      "sha256": "4994bad3a8db25a6c2ac9ace14965c4eaa11cd8e2081210650cb5b02efe2683e"
+    },
+    {
+      "file": "src/ui/assets.rs",
+      "sha256": "00db9daecddb018d8959cbde9d4a9c50a0b8be010bc13b8a6a0fc7acb90ff66b"
+    },
+    {
+      "file": "src/ui/components.rs",
+      "sha256": "fd41bfd3055d42efc3e8e663bebbe353a64ba0bd91839f4bb6e170469f51121c"
+    },
+    {
+      "file": "src/ui/mod.rs",
+      "sha256": "660b163a8d44ad4e8224afda3a70e50c8c91c9a2a3d542938e909cb20db873e9"
+    },
+    {
+      "file": "src/ui/theme.rs",
+      "sha256": "9ed0f3374f78d861645b7695b2f48a92a5d766808e44336200563ef73423cb9a"
+    },
+    {
+      "file": "src/ui/views.rs",
+      "sha256": "7da1668de2bd3ed30b85d95bd30f612884a851e48ecaaf1215a9e2d65315cbd3"
+    },
+    {
+      "file": "src/ui_callback.rs",
+      "sha256": "1727b6e7a7a99b80c0c6ff93782edb7f21139b457c576c8719fa3b1069fcc934"
+    }
+  ],
+  "remaining": [
+    "Remote GitHub CI outcome pending",
+    "Signed installers/platform distribution not implemented",
+    "Physical YubiKey/browser signing unverified"
+  ]
+}
