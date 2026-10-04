@@ -209,6 +209,14 @@ fn rich_wallets(model: &Model) -> Vec<crate::ui_callback::WalletView> {
     by_id.into_values().collect()
 }
 
+/// A wallet setup's FROST rounds are running. The engine also raises
+/// `dkg_in_progress` when a *signing* mesh is ready (it reuses the round-1
+/// trigger), so only count it while a wallet setup is open — otherwise a
+/// co-signer shows "Generating keys" after approving a request.
+fn dkg_running(model: &Model) -> bool {
+    model.wallet_state.dkg_in_progress && ceremony_open(model)
+}
+
 /// The FROST part of the running wallet setup is done (`Complete`) but the
 /// wallet isn't finalized yet: the Ethereum (ECDSA) key is being made. The
 /// engine clears `creating_wallet` / `joining_session` only on finalize.
@@ -369,7 +377,7 @@ impl CoreAdapter {
                 model.wallet_state.dkg_round,
                 starlab_client::elm::message::DKGRound::Complete
             );
-            let active = model.wallet_state.dkg_in_progress && !dkg_done;
+            let active = dkg_running(model) && !dkg_done;
             let (round, progress) = if active {
                 dkg_round_progress(&model.wallet_state.dkg_round)
             } else {
@@ -755,6 +763,15 @@ mod tests {
             watch.status(false),
             EcdsaSetup::Preparing { elapsed_secs: 0 }
         );
+    }
+
+    #[test]
+    fn a_signing_mesh_is_not_a_wallet_setup() {
+        let mut model = Model::new("d".to_string());
+        model.wallet_state.dkg_in_progress = true; // raised by a signing mesh
+        assert!(!dkg_running(&model));
+        model.wallet_state.joining_session = Some("s".to_string());
+        assert!(dkg_running(&model));
     }
 
     #[test]
