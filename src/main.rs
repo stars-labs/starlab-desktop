@@ -1835,6 +1835,15 @@ mod tests {
         state.ecdsa_keygen = false;
         state.ecdsa_phase = None;
         state.active_session = None;
+        let previous_status = state.status.clone();
+        let previous_status_is_error = state.status_is_error;
+        state.status =
+            "Wallet setup failed: a device disconnected. Reconnect the devices and try again."
+                .to_string();
+        state.status_is_error = true;
+        shot(&state, "15b-setup-failed");
+        state.status = previous_status;
+        state.status_is_error = previous_status_is_error;
         state.active_tab = Tab::Sign;
         state.selected_account = 1;
         let mut second_wallet = state.wallets[0].clone();
