@@ -43,11 +43,14 @@ view(&State)->Element<Message>  <->  update(&mut State, Message)  <->  core_adap
   invites and signing requests, connection, DKG progress — into `UiEvent`s;
   `NativeUICallback` forwards the signing manager's progress. An Iced
   `Subscription` drains the channel into `Message::Ui`.
-- **Layout**: the left column holds what everything else depends on — Network
-  (server + room ID) and Wallets (account picker, wallet password). The main
-  area follows the flow: *Set up wallet* (create / join) → *Sign* → *Activity*.
-  A running wallet setup and peers' signature requests are pinned above the
-  tabs; a status bar shows the latest result or error.
+- **Layout**: the sidebar selects wallets and accounts and navigates to wallet
+  setup, signing, activity, connection/devices, and backup/restore. Connection
+  settings and backup passwords live in their dedicated panels. Running setup
+  and incoming signature requests stay above the main flow.
+- **Visuals**: `src/ui/` owns the desktop palette, reusable presentation, and
+  locally embedded native-chain assets; `src/ui/assets/PROVENANCE.md` records
+  the same asset sources used by the browser extension. Chain marks remain
+  available without an internet connection.
 
 ## Status
 
@@ -60,15 +63,21 @@ skip the file dialog on machines without a desktop file portal). The SD-card
 air-gap is not exposed.
 
 The Ethereum key needs Paillier safe primes, which take minutes of CPU: the
-app generates them in the background from launch and shows "ECDSA setup:
-preparing safe primes (…)" / "ready" in the sidebar. A wallet setup started
+app generates them in the background from launch and shows "Secure setup:
+preparing (…)" / "ready" under Connection. A wallet setup started
 before they are ready waits for them (the setup banner says so).
 
 ```bash
 cargo test                             # unit + headless UI tests (iced_test)
 cargo test -- --ignored                # 3 devices: create, sign, export/import (loopback)
-SNAPSHOT_DIR=/tmp/shots cargo test snapshots   # render the main screens to PNG
+SNAPSHOT_DIR=/tmp/shots cargo test snapshots   # normal + 1024x768 feature states and manifest
 ```
+
+For a CPU-only Xvfb session, set `ICED_BACKEND=tiny-skia` when launching the
+app. The native screenshot harness also uses tiny-skia. The default wgpu
+renderer showed uneven small-text spacing under software GPU rendering in
+Xvfb; the same release with tiny-skia rendered clearly. The normal desktop
+backend selection remains unchanged.
 
 ## Dependency note
 

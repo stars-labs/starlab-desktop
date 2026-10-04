@@ -736,11 +736,11 @@ mod tests {
             EcdsaSetup::Preparing { elapsed_secs: 9 }
                 .describe()
                 .as_deref(),
-            Some("ECDSA setup: preparing safe primes (9s so far, usually 1-5 min)")
+            Some("Secure setup: preparing (9s so far, usually 1-5 min)")
         );
         assert_eq!(
             EcdsaSetup::Ready.describe().as_deref(),
-            Some("ECDSA setup: ready")
+            Some("Secure setup: ready")
         );
         assert_eq!(EcdsaSetup::NotNeeded.describe(), None);
     }

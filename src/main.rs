@@ -12,15 +12,13 @@
 //! setup, a peer's signature request) is pinned above the tabs.
 
 mod core_adapter;
+mod ui;
 mod ui_callback;
 
 use std::sync::{Arc, Mutex as StdMutex};
 
 use iced::futures::stream;
-use iced::widget::{
-    Column, Row, Space, button, column, container, progress_bar, row, scrollable, text, text_input,
-};
-use iced::{Alignment, Background, Border, Color, Element, Length, Subscription, Task, Theme};
+use iced::{Subscription, Task, Theme};
 
 use core_adapter::{CoreAdapter, DEFAULT_THRESHOLD, DEFAULT_TOTAL};
 use starlab_client::core::{SigningRequest, SigningState};
@@ -38,6 +36,10 @@ fn main() -> iced::Result {
 
     iced::application(State::new, State::update, State::view)
         .title("Starlab Desktop")
+        .settings(iced::Settings {
+            default_text_size: 14.0.into(),
+            ..iced::Settings::default()
+        })
         .theme(State::theme)
         .subscription(State::subscription)
         .run()
@@ -53,6 +55,8 @@ pub enum Tab {
     Setup,
     Sign,
     Activity,
+    Connection,
+    Backup,
 }
 
 /// Every password field sits next to the action that needs it.
@@ -108,6 +112,8 @@ enum PendingAction {
 pub enum Message {
     Ui(UiEvent),
     TabSelected(Tab),
+    ToggleActivityDetails,
+    ToggleSigningDetails,
 
     // Network
     ServerUrlChanged(String),
@@ -249,6 +255,8 @@ pub struct State {
 
     // UI
     active_tab: Tab,
+    show_activity_details: bool,
+    show_signing_details: bool,
     wallet_name: String,
     invite_id: String,
     pending_action: Option<PendingAction>,
@@ -316,6 +324,8 @@ impl State {
             last_signature: String::new(),
             last_signed: None,
             active_tab: Tab::Setup,
+            show_activity_details: false,
+            show_signing_details: false,
             wallet_name: String::new(),
             invite_id: String::new(),
             pending_action: None,
@@ -329,7 +339,7 @@ impl State {
     }
 
     fn theme(&self) -> Theme {
-        Theme::Dark
+        ui::theme::desktop_theme()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -348,6 +358,14 @@ impl State {
         match message {
             Message::Ui(event) => {
                 self.apply_ui_event(event);
+                Task::none()
+            }
+            Message::ToggleSigningDetails => {
+                self.show_signing_details = !self.show_signing_details;
+                Task::none()
+            }
+            Message::ToggleActivityDetails => {
+                self.show_activity_details = !self.show_activity_details;
                 Task::none()
             }
             Message::TabSelected(tab) => {
@@ -823,682 +841,6 @@ impl State {
     }
 
     // -- View -----------------------------------------------------------
-
-    fn view(&self) -> Element<'_, Message> {
-        container(
-            column![
-                self.header(),
-                row![
-                    container(self.sidebar()).width(Length::Fixed(340.0)),
-                    container(self.main_panel()).width(Length::Fill),
-                ]
-                .spacing(18)
-                .height(Length::Fill),
-                self.status_bar(),
-            ]
-            .spacing(14),
-        )
-        .padding(20)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
-    }
-
-    fn header(&self) -> Element<'_, Message> {
-        let (dot, label, color) = if self.connected {
-            let label = match self.peers {
-                0 => "Connected".to_string(),
-                1 => "Connected · 1 peer".to_string(),
-                n => format!("Connected · {n} peers"),
-            };
-            ("●", label, accent())
-        } else if self.connected_url.is_some() {
-            ("◌", "Connecting…".to_string(), warning())
-        } else {
-            ("○", "Offline".to_string(), muted())
-        };
-        row![
-            column![
-                text("Starlab Desktop").size(22),
-                text("MPC Wallet").size(12).color(muted()),
-            ]
-            .spacing(2),
-            Space::new().width(Length::Fill),
-            column![
-                row![text(dot).color(color), text(label).size(13).color(color)]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                text(format!("Device {}", self.device_id))
-                    .size(12)
-                    .color(muted()),
-            ]
-            .spacing(2)
-            .align_x(Alignment::End),
-        ]
-        .align_y(Alignment::Center)
-        .into()
-    }
-
-    fn status_bar(&self) -> Element<'_, Message> {
-        text(&self.status)
-            .size(12)
-            .color(if self.status_is_error {
-                danger()
-            } else {
-                muted()
-            })
-            .into()
-    }
-
-    // ---- Sidebar ----
-
-    fn sidebar(&self) -> Element<'_, Message> {
-        let mut items = column![self.network_card()].spacing(12);
-        if let Some(setup) = self.ecdsa_setup.describe() {
-            items = items.push(text(setup).size(12).color(
-                if self.ecdsa_setup == EcdsaSetup::Ready {
-                    accent()
-                } else {
-                    warning()
-                },
-            ));
-        }
-        scrollable(items.push(self.wallets_card())).into()
-    }
-
-    fn network_card(&self) -> Element<'_, Message> {
-        let mut body = column![
-            field(
-                "Signal server",
-                text_input("wss://panda.qzz.io", &self.server_url)
-                    .on_input(Message::ServerUrlChanged),
-            ),
-            field(
-                "Room ID",
-                text_input("Room ID", &self.room).on_input(Message::RoomChanged),
-            ),
-            row![
-                action_button("New room").on_press(Message::NewRoom),
-                action_button("Copy").on_press(Message::CopyRoom),
-            ]
-            .spacing(8),
-            hint("Devices find each other through the same server and room ID."),
-        ]
-        .spacing(10);
-
-        if self.network_changed() {
-            let label = if self.connected {
-                "Reconnect"
-            } else {
-                "Connect"
-            };
-            body = body.push(
-                action_button(label)
-                    .style(button::primary)
-                    .width(Length::Fill)
-                    .on_press_maybe(self.can_connect().then_some(Message::Connect)),
-            );
-            if self.connected {
-                body = body.push(hint(if self.can_connect() {
-                    "Reconnect to use the new server or room."
-                } else {
-                    "Finish or cancel the wallet setup before switching rooms."
-                }));
-            }
-        }
-
-        card("Network", body.into())
-    }
-
-    fn wallets_card(&self) -> Element<'_, Message> {
-        let mut body = Column::new().spacing(10);
-        if self.wallets.is_empty() {
-            body = body.push(hint(
-                "No wallets on this device yet. Create or join one under Set up wallet.",
-            ));
-        } else {
-            for (i, w) in self.wallets.iter().enumerate() {
-                let mut entry = Column::new().spacing(3).push(
-                    button(text(format!("{} · {}", w.name, w.threshold)).size(13))
-                        .width(Length::Fill)
-                        .style(if i == self.active_wallet_index {
-                            button::primary
-                        } else {
-                            button::secondary
-                        })
-                        .on_press(Message::WalletSelected(i)),
-                );
-                // One line per chain address of the selected account, derived
-                // from the group key via the engine's account model.
-                for (curve, group_key) in &w.keys {
-                    let Ok(group_key) = hex::decode(group_key) else {
-                        continue;
-                    };
-                    let Ok(addresses) = starlab_core::accounts::account_addresses(
-                        curve,
-                        &group_key,
-                        self.selected_account,
-                    ) else {
-                        continue;
-                    };
-                    for (chain, _path, address) in addresses {
-                        entry = entry.push(
-                            text(format!("{chain}  {}", short_addr(&address)))
-                                .size(12)
-                                .color(muted()),
-                        );
-                    }
-                }
-                body = body.push(entry);
-            }
-            // BIP-44 account picker: [Account 0] [Account 1] … [+]. Switching
-            // is a pure State change — addresses below re-derive in this view.
-            let mut accounts = Row::new().spacing(6);
-            for i in 0..=self.max_account {
-                accounts = accounts.push(segment_button(
-                    format!("Account {i}"),
-                    Message::SelectAccount(i),
-                    i == self.selected_account,
-                ));
-            }
-            accounts = accounts.push(button(text("+").size(13)).on_press(Message::AddAccount));
-            body = body.push(field(
-                "Account",
-                scrollable(accounts).direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::default(),
-                )),
-            ));
-        }
-
-        let backup = if self.wallets.is_empty() {
-            self.import_blocker()
-        } else {
-            self.export_blocker().or(self.import_blocker())
-        };
-        body = body
-            .push(section_divider())
-            .push(text("Back up or restore").size(13))
-            .push(field(
-                "Key share password",
-                password_input("Password", &self.passwords.backup, PasswordField::Backup),
-            ))
-            .push(
-                row![
-                    action_button("Import key share…").on_press_maybe(
-                        self.import_blocker()
-                            .is_none()
-                            .then_some(Message::ImportShare)
-                    ),
-                    action_button("Export key share…").on_press_maybe(
-                        self.export_blocker()
-                            .is_none()
-                            .then_some(Message::ExportShare)
-                    ),
-                ]
-                .spacing(8),
-            );
-        body = body.push(match backup {
-            Some(reason) => text(reason).size(12).color(warning()).into(),
-            None => hint(
-                "Export saves this device's encrypted key share of the selected wallet; \
-                 import restores one.",
-            ),
-        });
-
-        card("Wallets", body.into())
-    }
-
-    // ---- Main area ----
-
-    fn main_panel(&self) -> Element<'_, Message> {
-        let mut content = Column::new().spacing(14);
-        if let Some(banner) = self.setup_banner() {
-            content = content.push(banner);
-        }
-        if let Some(requests) = self.signature_requests() {
-            content = content.push(requests);
-        }
-        content = content.push(
-            row![
-                tab_button("Set up wallet", Tab::Setup, self.active_tab),
-                tab_button("Sign", Tab::Sign, self.active_tab),
-                tab_button("Activity", Tab::Activity, self.active_tab),
-            ]
-            .spacing(6),
-        );
-        content = content.push(match self.active_tab {
-            Tab::Setup => self.setup_tab(),
-            Tab::Sign => self.sign_tab(),
-            Tab::Activity => self.activity_tab(),
-        });
-        scrollable(content).into()
-    }
-
-    /// Pinned while a wallet setup is running: who joined, the invite to
-    /// share, DKG progress, and the way out.
-    fn setup_banner(&self) -> Option<Element<'_, Message>> {
-        if !(self.ceremony_open || self.dkg_active) {
-            return None;
-        }
-        if self.ecdsa_keygen {
-            return Some(self.ecdsa_keygen_banner());
-        }
-        let own = self.own_invite();
-        let joined = self.active_session.as_ref().map(|s| {
-            format!(
-                "{} of {} devices have joined.",
-                s.participants.len(),
-                s.total
-            )
-        });
-        let (title, detail) = if self.dkg_active {
-            (
-                "Generating keys",
-                format!(
-                    "Round {} of 2 — keep every device online until it finishes.",
-                    self.dkg_round.max(1)
-                ),
-            )
-        } else if own.is_some() {
-            (
-                "Waiting for devices to join",
-                format!(
-                    "{} Share the invite ID with the other devices.",
-                    joined.unwrap_or_default()
-                ),
-            )
-        } else {
-            (
-                "Joined — waiting for the other devices",
-                joined.unwrap_or_default(),
-            )
-        };
-
-        let mut body = column![
-            row![
-                text(title).size(15),
-                Space::new().width(Length::Fill),
-                action_button("Cancel")
-                    .style(button::danger)
-                    .on_press(Message::CancelSetup),
-            ]
-            .align_y(Alignment::Center),
-            text(detail).size(13).color(muted()),
-        ]
-        .spacing(8);
-        if let Some(invite) = own.filter(|_| !self.dkg_active) {
-            body = body.push(
-                row![
-                    text("Invite ID").size(12).color(muted()),
-                    text(&invite.id).size(13),
-                    Space::new().width(Length::Fill),
-                    action_button("Copy invite").on_press(Message::CopyInvite),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            );
-        }
-        if self.dkg_active {
-            body = body.push(progress_bar(0.0..=1.0, self.dkg_progress));
-        }
-        Some(
-            container(body)
-                .padding(14)
-                .width(Length::Fill)
-                .style(highlight_style)
-                .into(),
-        )
-    }
-
-    /// The wallet's FROST keys are done; its Ethereum key (threshold ECDSA)
-    /// is being made — waiting for this device's safe primes first if they
-    /// aren't ready yet.
-    fn ecdsa_keygen_banner(&self) -> Element<'_, Message> {
-        let (detail, progress) = ecdsa_keygen_detail(self.ecdsa_phase, self.ecdsa_setup);
-        container(
-            column![
-                row![
-                    text("Generating the Ethereum key (threshold ECDSA)").size(15),
-                    Space::new().width(Length::Fill),
-                    action_button("Cancel")
-                        .style(button::danger)
-                        .on_press(Message::CancelSetup),
-                ]
-                .align_y(Alignment::Center),
-                text(detail).size(13).color(muted()),
-                progress_bar(0.0..=1.0, progress),
-            ]
-            .spacing(8),
-        )
-        .padding(14)
-        .width(Length::Fill)
-        .style(highlight_style)
-        .into()
-    }
-
-    /// Pinned while a peer asks this device to co-sign.
-    fn signature_requests(&self) -> Option<Element<'_, Message>> {
-        let request = self
-            .signing_request
-            .as_ref()
-            .filter(|r| r.session_id.is_some())?;
-        let blocker = self.approve_blocker();
-        let actions: Element<'_, Message> = match &self.signing_state {
-            SigningState::Commitment | SigningState::Share | SigningState::Aggregating => {
-                text("Co-signing…").size(13).color(accent()).into()
-            }
-            SigningState::Failed(error) => row![
-                text(format!("Signing failed: {error}"))
-                    .size(12)
-                    .color(danger()),
-                Space::new().width(Length::Fill),
-                action_button("Dismiss").on_press(Message::DismissSigning),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .into(),
-            _ => row![
-                text(blocker.unwrap_or_default()).size(12).color(warning()),
-                Space::new().width(Length::Fill),
-                action_button("Reject")
-                    .style(button::secondary)
-                    .on_press(Message::RejectSignatureRequest(request.id.clone())),
-                action_button("Approve & sign")
-                    .style(button::primary)
-                    .on_press_maybe(
-                        blocker
-                            .is_none()
-                            .then(|| Message::ApproveSignatureRequest(request.id.clone())),
-                    ),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .into(),
-        };
-        let mut body = column![
-            text("Signature request").size(15),
-            text("Another device of this wallet asks this device to co-sign.").size(13),
-            text(self.describe_account_wallet(&request.wallet_id))
-                .size(12)
-                .color(muted()),
-        ]
-        .spacing(4);
-        if let Some(label) = &request.display_label {
-            body = body.push(text(label).size(12).color(faint()));
-        }
-        body = body.push(
-            text(format!("Message  {}", short_addr(&request.message_hex)))
-                .size(12)
-                .color(faint()),
-        );
-        let awaiting = !matches!(
-            self.signing_state,
-            SigningState::Commitment
-                | SigningState::Share
-                | SigningState::Aggregating
-                | SigningState::Failed(_)
-        );
-        if awaiting {
-            body = body.push(
-                container(field(
-                    "Wallet password",
-                    password_input(
-                        "Unlocks this device's key share",
-                        &self.passwords.unlock,
-                        PasswordField::Unlock,
-                    ),
-                ))
-                .width(Length::Fixed(360.0)),
-            );
-        }
-        body = body.push(actions);
-        Some(
-            container(body)
-                .padding(14)
-                .width(Length::Fill)
-                .style(highlight_style)
-                .into(),
-        )
-    }
-
-    /// Create and Join side by side: each section has exactly one action.
-    fn setup_tab(&self) -> Element<'_, Message> {
-        let create_blocker = self.create_blocker();
-        let create = card(
-            "Create a new wallet",
-            column![
-                text(format!(
-                    "Start a {DEFAULT_THRESHOLD}-of-{DEFAULT_TOTAL} wallet on this device, then share \
-                     its invite ID with {} other devices. Any {DEFAULT_THRESHOLD} of the \
-                     {DEFAULT_TOTAL} can sign.",
-                    DEFAULT_TOTAL - 1
-                ))
-                .size(13)
-                .color(muted()),
-                field(
-                    "Wallet name",
-                    text_input("e.g. Treasury", &self.wallet_name)
-                        .on_input(Message::WalletNameChanged),
-                ),
-                new_password_fields(
-                    &self.passwords.create,
-                    &self.passwords.create_confirm,
-                    PasswordField::Create,
-                    PasswordField::CreateConfirm,
-                ),
-                action_row(
-                    action_button("Create wallet")
-                        .style(button::primary)
-                        .on_press_maybe(create_blocker.is_none().then_some(Message::CreateWallet)),
-                    create_blocker,
-                ),
-            ]
-            .spacing(12)
-            .into(),
-        );
-
-        let mut invites = Column::new().spacing(6);
-        let wallet_invites = wallet_invites(&self.device_id, &self.invites);
-        if wallet_invites.is_empty() {
-            invites = invites.push(hint("No invites in this room yet."));
-        }
-        for invite in wallet_invites {
-            invites = invites.push(
-                button(
-                    column![
-                        text(&invite.id).size(13),
-                        text(format!(
-                            "from {} · {} of {} joined",
-                            invite.proposer,
-                            invite.participants.len(),
-                            invite.total
-                        ))
-                        .size(11),
-                    ]
-                    .spacing(2),
-                )
-                .width(Length::Fill)
-                .style(if invite.id == self.invite_id.trim() {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::InviteIdChanged(invite.id.clone())),
-            );
-        }
-        let join_blocker = self.join_blocker();
-        let join = card(
-            "Join a wallet",
-            column![
-                text("Another device started it: pick its invite, or paste the invite ID.")
-                    .size(13)
-                    .color(muted()),
-                field("Invites in this room", invites),
-                field(
-                    "Invite ID",
-                    text_input("Paste invite ID", &self.invite_id)
-                        .on_input(Message::InviteIdChanged),
-                ),
-                new_password_fields(
-                    &self.passwords.join,
-                    &self.passwords.join_confirm,
-                    PasswordField::Join,
-                    PasswordField::JoinConfirm,
-                ),
-                action_row(
-                    action_button("Join wallet")
-                        .style(button::primary)
-                        .on_press_maybe(join_blocker.is_none().then_some(Message::JoinWallet)),
-                    join_blocker,
-                ),
-            ]
-            .spacing(12)
-            .into(),
-        );
-
-        row![create, join].spacing(14).into()
-    }
-
-    fn sign_tab(&self) -> Element<'_, Message> {
-        let Some(wallet) = self.active_wallet() else {
-            return card(
-                "Sign a message",
-                column![
-                    hint("You need a shared wallet before you can sign."),
-                    action_button("Set up a wallet").on_press(Message::TabSelected(Tab::Setup)),
-                ]
-                .spacing(12)
-                .into(),
-            );
-        };
-
-        let mut chains = Row::new().spacing(8);
-        for (key, label) in device_chains(self.signing_curve) {
-            if wallet_has_chain(wallet, key) {
-                chains = chains.push(segment_button(
-                    label,
-                    Message::SignChainSelected(key),
-                    key == self.sign_chain,
-                ));
-            }
-        }
-        let address: Element<'_, Message> = match self.signing_address() {
-            Some((address, path)) => {
-                row![text(address).size(13), text(path).size(11).color(muted()),]
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .into()
-            }
-            None => hint("This wallet has no key for this chain on this device."),
-        };
-        let message_hint = match self.sign_chain {
-            "ethereum" => {
-                "Hex bytes; signed as an EIP-191 personal message with the wallet's \
-                 threshold-ECDSA key."
-            }
-            "bitcoin" => "The 32-byte BIP-341 sighash, in hex.",
-            _ => "Hex bytes to sign.",
-        };
-
-        let signing = self.pending_action == Some(PendingAction::Sign);
-        let blocker = if signing { None } else { self.sign_blocker() };
-        let mut body = column![
-            column![
-                text(format!(
-                    "{} · Account {}",
-                    wallet.name, self.selected_account
-                ))
-                .size(15),
-                hint("Choose the wallet and account in the left panel."),
-            ]
-            .spacing(4),
-            field("Chain", chains),
-            field("Signing address", address),
-            field(
-                "Message",
-                text_input("0x…", &self.sign_hex).on_input(Message::SignHexChanged),
-            ),
-            hint(message_hint),
-            field(
-                "Wallet password",
-                password_input(
-                    "Unlocks this device's key share",
-                    &self.passwords.unlock,
-                    PasswordField::Unlock,
-                ),
-            ),
-            action_row(
-                action_button(if signing {
-                    "Signing…"
-                } else {
-                    "Request signature"
-                })
-                .style(button::primary)
-                .on_press_maybe((blocker.is_none() && !signing).then_some(Message::Sign),),
-                blocker,
-            ),
-        ]
-        .spacing(12);
-
-        if signing {
-            body = body.push(
-                text(signing_phase(&self.signing_state))
-                    .size(13)
-                    .color(accent()),
-            );
-        } else if let SigningState::Failed(error) = &self.signing_state {
-            body = body.push(
-                text(format!("Signing failed: {error}"))
-                    .size(13)
-                    .color(danger()),
-            );
-        }
-        if !self.last_signature.is_empty() {
-            let summary = signature_summary(self.last_signed.as_ref(), &self.last_signature);
-            let mut details = Column::new().spacing(4);
-            if self.last_signed.as_ref().is_some_and(|s| s.cosigned) {
-                details = details.push(hint(
-                    "Co-signed for another device's request — it has this signature too.",
-                ));
-            }
-            details = details.push(
-                row![
-                    text(&self.last_signature)
-                        .size(12)
-                        .width(Length::Fill)
-                        .wrapping(iced::widget::text::Wrapping::Glyph),
-                    action_button("Copy").on_press(Message::CopySignature),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            );
-            for line in summary.parts {
-                details = details.push(text(line).size(12).color(muted()));
-            }
-            details = details.push(
-                text(summary.verification)
-                    .size(12)
-                    .color(if summary.verified { accent() } else { danger() }),
-            );
-            body = body.push(field(summary.label, details));
-        }
-
-        card("Sign a message", body.into())
-    }
-
-    fn activity_tab(&self) -> Element<'_, Message> {
-        let mut lines = Column::new().spacing(2);
-        if self.log_messages.is_empty() {
-            lines = lines.push(hint("Nothing yet."));
-        }
-        for line in &self.log_messages {
-            lines = lines.push(text(line).size(12).color(faint()));
-        }
-        card(
-            "Activity",
-            scrollable(lines).height(Length::Fixed(420.0)).into(),
-        )
-    }
 }
 
 /// What our own signing request was for: the chain, the message as typed
@@ -1643,23 +985,14 @@ fn signature_summary(signed: Option<&SignedFor>, signature_hex: &str) -> Signatu
     }
 }
 
-/// Detail line + progress for the Ethereum-key step of a wallet setup.
-fn ecdsa_keygen_detail(phase: Option<DkgPhase>, setup: EcdsaSetup) -> (String, f32) {
+/// The active Ethereum-key step; the next wallet's primes are independent.
+fn ecdsa_keygen_detail(phase: Option<DkgPhase>, setup: EcdsaSetup) -> String {
     match (phase, setup) {
-        (Some(DkgPhase::WaitingForPrimes), EcdsaSetup::Preparing { elapsed_secs }) => (
-            format!(
-                "Waiting for this device's safe primes ({} so far, usually 1-5 min). Keep \
-                 every device online.",
-                crate::ui_callback::format_elapsed(elapsed_secs)
-            ),
-            0.85,
+        (Some(DkgPhase::WaitingForPrimes), EcdsaSetup::Preparing { elapsed_secs }) => format!(
+            "Preparing secure wallet setup ({} so far, usually 1-5 min). Keep every device online.",
+            crate::ui_callback::format_elapsed(elapsed_secs)
         ),
-        _ => (
-            "Aux info and key generation with the other devices (about a minute). Keep \
-             every device online."
-                .to_string(),
-            0.92,
-        ),
+        _ => "Creating your shared Ethereum key with the other devices (about a minute). Keep every device online.".to_string(),
     }
 }
 
@@ -1694,43 +1027,6 @@ fn new_password_problem(password: &str, confirm: &str) -> Option<&'static str> {
 }
 
 /// Password + confirmation for a new key share, side by side.
-fn new_password_fields<'a>(
-    password: &str,
-    confirm: &str,
-    field_id: PasswordField,
-    confirm_id: PasswordField,
-) -> Element<'a, Message> {
-    column![
-        row![
-            container(field(
-                "Password",
-                password_input("At least 8 characters", password, field_id)
-            ))
-            .width(Length::Fill),
-            container(field(
-                "Confirm password",
-                password_input("Repeat it", confirm, confirm_id)
-            ))
-            .width(Length::Fill),
-        ]
-        .spacing(10),
-        hint("Encrypts this device's key share. You'll need it to sign."),
-    ]
-    .spacing(4)
-    .into()
-}
-
-fn password_input(
-    placeholder: &str,
-    value: &str,
-    field: PasswordField,
-) -> Element<'static, Message> {
-    text_input(placeholder, value)
-        .secure(true)
-        .on_input(move |v| Message::PasswordChanged(field, v))
-        .into()
-}
-
 /// Tab moves focus forward, Shift+Tab back.
 fn tab_focus(event: iced::keyboard::Event) -> Option<Message> {
     use iced::keyboard::{Event, Key, key::Named};
@@ -1857,132 +1153,6 @@ where
 // Small view helpers
 // ---------------------------------------------------------------------------
 
-fn card<'a>(title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
-    container(column![text(title).size(15), body].spacing(12))
-        .padding(14)
-        .width(Length::Fill)
-        .style(panel_style)
-        .into()
-}
-
-/// A labelled form field.
-fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label).size(12).color(muted()), input.into()]
-        .spacing(4)
-        .into()
-}
-
-fn hint(message: &str) -> Element<'_, Message> {
-    text(message).size(12).color(muted()).into()
-}
-
-/// A right-aligned primary action with the reason it's disabled on the left.
-fn action_row<'a>(
-    action: iced::widget::Button<'a, Message>,
-    blocker: Option<&'a str>,
-) -> Element<'a, Message> {
-    // The reason takes the remaining width and wraps; the button keeps its
-    // size, so a long reason in a narrow card can't squeeze it away.
-    row![
-        text(blocker.unwrap_or_default())
-            .size(12)
-            .color(warning())
-            .width(Length::Fill),
-        action,
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center)
-    .into()
-}
-
-/// A command button (Connect, Create wallet, Copy, …).
-fn action_button(label: &str) -> iced::widget::Button<'_, Message> {
-    button(text(label).size(14)).padding([7, 14])
-}
-
-/// One option of a segmented choice (tabs, modes, chains, accounts).
-fn segment_button<'a>(
-    label: impl text::IntoFragment<'a>,
-    message: Message,
-    selected: bool,
-) -> iced::widget::Button<'a, Message> {
-    button(text(label).size(13))
-        .style(if selected {
-            button::primary
-        } else {
-            button::secondary
-        })
-        .on_press(message)
-}
-
-fn tab_button(label: &str, tab: Tab, active: Tab) -> iced::widget::Button<'_, Message> {
-    segment_button(label, Message::TabSelected(tab), tab == active)
-}
-
-fn section_divider<'a>() -> Element<'a, Message> {
-    container(Space::new().height(1))
-        .height(1)
-        .width(Length::Fill)
-        .style(|_theme| container::Style {
-            background: Some(Background::Color(Color::from_rgb8(72, 78, 88))),
-            ..container::Style::default()
-        })
-        .into()
-}
-
-fn panel_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color::from_rgb8(45, 49, 56))),
-        text_color: Some(Color::from_rgb8(226, 230, 236)),
-        border: Border {
-            width: 1.0,
-            radius: 6.0.into(),
-            color: Color::from_rgb8(65, 72, 82),
-        },
-        ..container::Style::default()
-    }
-}
-
-/// A panel that needs attention now (running setup, incoming requests).
-fn highlight_style(theme: &Theme) -> container::Style {
-    container::Style {
-        border: Border {
-            width: 1.0,
-            radius: 6.0.into(),
-            color: accent(),
-        },
-        ..panel_style(theme)
-    }
-}
-
-fn short_addr(addr: &str) -> String {
-    if addr.len() > 20 {
-        format!("{}…{}", &addr[..10], &addr[addr.len() - 6..])
-    } else {
-        addr.to_string()
-    }
-}
-
-fn accent() -> Color {
-    Color::from_rgb(0.063, 0.725, 0.506) // #10B981
-}
-
-fn warning() -> Color {
-    Color::from_rgb8(236, 190, 104)
-}
-
-fn danger() -> Color {
-    Color::from_rgb8(248, 113, 113)
-}
-
-fn muted() -> Color {
-    Color::from_rgb(0.58, 0.64, 0.72) // #94A3B8
-}
-
-fn faint() -> Color {
-    Color::from_rgb(0.80, 0.84, 0.88) // #CBD5E1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2094,9 +1264,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connection_and_backup_controls_are_reachable_from_navigation() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        assert!(simulator(state.view()).find("Signal server").is_err());
+        assert!(simulator(state.view()).find("Key share password").is_err());
+        assert!(matches!(
+            clicked(&state, "Connection & devices").as_slice(),
+            [Message::TabSelected(Tab::Connection)]
+        ));
+        let _ = state.update(Message::TabSelected(Tab::Connection));
+        assert!(simulator(state.view()).find("Signal server").is_ok());
+        assert!(matches!(
+            clicked(&state, "Backup & restore").as_slice(),
+            [Message::TabSelected(Tab::Backup)]
+        ));
+        let _ = state.update(Message::TabSelected(Tab::Backup));
+        assert!(simulator(state.view()).find("Key share password").is_ok());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
     async fn network_has_a_single_new_room_action() {
         let _renderer = renderer_lock();
-        let (state, keystore) = test_state();
+        let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Connection;
         let mut ui = simulator(state.view());
         assert!(
             ui.find("New").is_err(),
@@ -2113,6 +1305,7 @@ mod tests {
     async fn new_room_while_connected_offers_reconnect() {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Connection;
         connected(&mut state);
         assert!(simulator(state.view()).find("Reconnect").is_err());
         let _ = state.update(Message::NewRoom);
@@ -2323,7 +1516,13 @@ mod tests {
         );
         let mut ui = simulator(state.view());
         assert!(ui.find("Bitcoin").is_ok());
-        assert!(ui.find("m/44'/60'/0'/0/0").is_ok(), "Ethereum account path");
+        assert!(
+            ui.find("m/44'/60'/0'/0/0").is_err(),
+            "path stays behind signing details"
+        );
+        drop(ui);
+        state.show_signing_details = true;
+        assert!(simulator(state.view()).find("m/44'/60'/0'/0/0").is_ok());
         assert_eq!(
             state.signing_wallet_id().as_deref(),
             Some("9c1f4e2ab37d-ethereum-0")
@@ -2336,9 +1535,10 @@ mod tests {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
         state.ecdsa_setup = EcdsaSetup::Preparing { elapsed_secs: 72 };
+        state.active_tab = Tab::Connection;
         assert!(
             simulator(state.view())
-                .find("ECDSA setup: preparing safe primes (1m 12s so far, usually 1-5 min)")
+                .find("Secure setup: preparing (1m 12s so far, usually 1-5 min)")
                 .is_ok()
         );
         // FROST done, Ethereum key waiting for this device's primes.
@@ -2346,20 +1546,17 @@ mod tests {
         state.ecdsa_keygen = true;
         state.ecdsa_phase = Some(DkgPhase::WaitingForPrimes);
         let mut ui = simulator(state.view());
-        assert!(
-            ui.find("Generating the Ethereum key (threshold ECDSA)")
-                .is_ok()
-        );
+        assert!(ui.find("Creating Ethereum wallet").is_ok());
         assert!(
             ui.find(
-                "Waiting for this device's safe primes (1m 12s so far, usually 1-5 min). Keep \
+                "Preparing secure wallet setup (1m 12s so far, usually 1-5 min). Keep \
                  every device online."
             )
             .is_ok()
         );
         drop(ui);
         state.ecdsa_setup = EcdsaSetup::Ready;
-        assert!(simulator(state.view()).find("ECDSA setup: ready").is_ok());
+        assert!(simulator(state.view()).find("Secure setup: ready").is_ok());
         let _ = std::fs::remove_dir_all(keystore);
     }
 
@@ -2367,13 +1564,11 @@ mod tests {
     fn running_ecdsa_ceremony_does_not_wait_for_next_wallet_primes() {
         let next_wallet = EcdsaSetup::Preparing { elapsed_secs: 72 };
         for phase in [DkgPhase::AuxInfo, DkgPhase::Keygen] {
-            let (detail, progress) = ecdsa_keygen_detail(Some(phase), next_wallet);
-            assert!(detail.starts_with("Aux info and key generation"));
-            assert_eq!(progress, 0.92);
+            let detail = ecdsa_keygen_detail(Some(phase), next_wallet);
+            assert!(detail.starts_with("Creating your shared Ethereum key"));
         }
-        let (detail, progress) = ecdsa_keygen_detail(Some(DkgPhase::WaitingForPrimes), next_wallet);
-        assert!(detail.starts_with("Waiting for this device's safe primes"));
-        assert_eq!(progress, 0.85);
+        let detail = ecdsa_keygen_detail(Some(DkgPhase::WaitingForPrimes), next_wallet);
+        assert!(detail.starts_with("Preparing secure wallet setup"));
     }
 
     #[tokio::test]
@@ -2396,9 +1591,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_setup_focuses_devices_and_keeps_cancel_reachable() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        state.ceremony_open = true;
+        state.active_session = Some(invite("active", "me", &["me", "laptop"]));
+        let mut ui = simulator(state.view());
+        assert!(ui.find("Current wallet setup").is_ok());
+        assert!(ui.find("Create a new wallet").is_err());
+        assert!(ui.find("Join a wallet").is_err());
+        drop(ui);
+        assert!(matches!(
+            clicked(&state, "Cancel").as_slice(),
+            [Message::CancelSetup]
+        ));
+        state.ceremony_open = false;
+        assert!(simulator(state.view()).find("Create a new wallet").is_ok());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
     async fn export_needs_a_wallet_and_an_8_character_password() {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Backup;
         state.passwords.backup = "password1".to_string();
         assert!(clicked(&state, "Export key share…").is_empty());
         with_wallet(&mut state);
@@ -2513,18 +1729,21 @@ mod tests {
         let Ok(dir) = std::env::var("SNAPSHOT_DIR") else {
             return;
         };
+        let manifest = std::cell::RefCell::new(Vec::new());
         let shot = |state: &State, name: &str| {
-            let mut ui = iced_test::Simulator::with_size(
-                iced::Settings::default(),
-                (1440.0, 900.0),
-                state.view(),
-            );
-            let snapshot = ui.snapshot(&Theme::Dark).expect("snapshot");
-            let path = std::path::Path::new(&dir).join(name);
-            assert!(
-                snapshot.matches_image(&path).expect("png"),
-                "{name} changed"
-            );
+            for (viewport, size) in [("normal", (1440.0, 900.0)), ("narrow", (1024.0, 768.0))] {
+                let folder = std::path::Path::new(&dir).join(viewport);
+                std::fs::create_dir_all(&folder).expect("snapshot folder");
+                let mut ui =
+                    iced_test::Simulator::with_size(iced::Settings::default(), size, state.view());
+                let snapshot = ui.snapshot(&state.theme()).expect("snapshot");
+                let path = folder.join(name);
+                assert!(
+                    snapshot.matches_image(&path).expect("png"),
+                    "{viewport}/{name} changed"
+                );
+                manifest.borrow_mut().push(serde_json::json!({"state":name,"viewport":viewport,"width":size.0,"height":size.1,"provenance":"public fixture data; no private shares","file":format!("{viewport}/{name}-tiny-skia.png")}));
+            }
         };
 
         let (mut state, keystore) = test_state();
@@ -2577,6 +1796,118 @@ mod tests {
         ));
         state.last_signature = "a3f1c9e2".repeat(16);
         shot(&state, "5-sign");
+        state.signing_request = None;
+        state.last_signature.clear();
+        shot(&state, "06-wallet-sign");
+        state.active_tab = Tab::Connection;
+        shot(&state, "07-connection");
+        state.server_url = "invalid server".to_string();
+        shot(&state, "08-connection-invalid");
+        state.server_url = "ws://127.0.0.1:9".to_string();
+        state.active_tab = Tab::Backup;
+        shot(&state, "09-backup-locked");
+        state.passwords.backup = "fixture-password".to_string();
+        shot(&state, "10-backup-ready");
+        state.status = "Backup password is incorrect. Try again.".to_string();
+        state.status_is_error = true;
+        shot(&state, "11-backup-error");
+        state.status = "Encrypted device backup saved.".to_string();
+        state.status_is_error = false;
+        shot(&state, "12-backup-success");
+        state.active_tab = Tab::Setup;
+        state.ceremony_open = true;
+        state.ecdsa_keygen = true;
+        state.ecdsa_setup = EcdsaSetup::Preparing { elapsed_secs: 72 };
+        state.active_session = Some(invite(
+            "fixture-active-setup",
+            "me",
+            &["me", "laptop", "phone"],
+        ));
+        for (name, phase) in [
+            ("13-setup-primes", DkgPhase::WaitingForPrimes),
+            ("14-setup-aux", DkgPhase::AuxInfo),
+            ("15-setup-keygen", DkgPhase::Keygen),
+        ] {
+            state.ecdsa_phase = Some(phase);
+            shot(&state, name);
+        }
+        state.ceremony_open = false;
+        state.ecdsa_keygen = false;
+        state.ecdsa_phase = None;
+        state.active_session = None;
+        state.active_tab = Tab::Sign;
+        state.selected_account = 1;
+        let mut second_wallet = state.wallets[0].clone();
+        second_wallet.name = "Operations".to_string();
+        second_wallet.id = "fixture-operations".to_string();
+        state.wallets.push(second_wallet);
+        shot(&state, "16-wallets-accounts");
+        state.sign_hex = "invalid hex".to_string();
+        shot(&state, "17-sign-invalid");
+        state.sign_hex = "48656c6c6f".to_string();
+        state.signing_request = Some(peer_request(
+            "9c1f4e2ab37d-ethereum-0",
+            "fa4de0de7cb829ad54bf4982c3603afe1596fd39a76004184fa2844fda56ac6c",
+        ));
+        state.passwords.unlock.clear();
+        shot(&state, "18-approval-password");
+        state.passwords.unlock = "fixture-password".to_string();
+        state.pending_action = Some(PendingAction::CoSign);
+        state.signing_state = SigningState::Aggregating;
+        shot(&state, "19-approval-working");
+        state.pending_action = None;
+        state.signing_state =
+            SigningState::Failed("The other device declined this request.".to_string());
+        shot(&state, "20-approval-declined");
+        state.signing_state =
+            SigningState::Failed("Wallet password is incorrect. Try again.".to_string());
+        shot(&state, "20b-approval-password-error");
+        state.signing_request = None;
+        state.signing_state = SigningState::Complete;
+        state.selected_account = 0;
+        state.wallets[0].keys[0].1 =
+            "032affa8a1c464656c918705206638118d36adc42fb4310f9b12f6b027a0a53b8b".to_string();
+        state.last_signature = "7937057016c1e21b9ff07affded820bf5aa5bf483d9610a27584716007925fd90b4fe3b114f15ca8dc3332f44250e5904611bd4cab4a53334aa17bbd9cd0a8cc1c".to_string();
+        state.last_signed = Some(SignedFor {
+            chain: "ethereum",
+            message_hex: "fa4de0de7cb829ad54bf4982c3603afe1596fd39a76004184fa2844fda56ac6c"
+                .to_string(),
+            prehashed: true,
+            address: "0x2fb6ae33558e46ec6baa39c9c98cd00f4b0f7548".to_string(),
+            cosigned: true,
+        });
+        shot(&state, "21-signature-verified");
+        state.sign_chain = "bitcoin";
+        state.last_signature.clear();
+        shot(&state, "21b-bitcoin-sign");
+        state.active_tab = Tab::Activity;
+        shot(&state, "22-activity-empty");
+        state.log_messages = vec![
+            "14:50:00 [INFO] Wallet setup started with 3 devices.".to_string(),
+            "14:52:00 [INFO] Ethereum wallet is ready.".to_string(),
+            "14:53:00 [ERROR] Another device declined the signature request.".to_string(),
+            "14:55:00 [INFO] Signature verified for Treasury, account 0.".to_string(),
+        ];
+        shot(&state, "23-activity-events");
+        state.show_activity_details = true;
+        shot(&state, "24-activity-details");
+        state.active_tab = Tab::Sign;
+        state.signing_curve = "ed25519";
+        state.wallets.truncate(1);
+        state.wallets[0].keys = vec![(
+            "ed25519".to_string(),
+            "5866666666666666666666666666666666666666666666666666666666666666".to_string(),
+        )];
+        state.ecdsa_setup = EcdsaSetup::NotNeeded;
+        state.sign_chain = "solana";
+        shot(&state, "25-solana-sign");
+        state.sign_chain = "sui";
+        shot(&state, "26-sui-sign");
+        std::fs::write(
+            std::path::Path::new(&dir).join("manifest.json"),
+            serde_json::to_string_pretty(&manifest.into_inner()).unwrap(),
+        )
+        .expect("snapshot manifest");
 
         let _ = std::fs::remove_dir_all(keystore);
     }

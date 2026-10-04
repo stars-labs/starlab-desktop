@@ -10,7 +10,7 @@ publish = false
 # Iced UI (Elm architecture, MIT-licensed). The default backend (wgpu) +
 # tiny-skia fallback covers X11, Wayland, macOS and Windows. `tokio` feature
 # wires Iced's executor to the same Tokio runtime the core managers run on.
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "svg", "image-without-codecs"] }
 
 # Business-logic backend: the FROST engine + core managers
 # (WalletManager, SessionManager, DkgManager, OfflineManager,
@@ -22,6 +22,9 @@ starlab-client = { git = "https://github.com/stars-labs/starlab-mpc", branch = "
 # derivation) — single source of truth shared by every client. Used directly
 # by the view layer so switching accounts is a pure local re-derivation.
 starlab-core = { git = "https://github.com/stars-labs/starlab-mpc", branch = "feat/ecdsa-cggmp24" }
+
+# Decode the packaged Sui PNG only; avoid unrelated image codec dependencies.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 hex = "0.4.3"
 uuid = { version = "1.26.1", features = ["v4"] }
