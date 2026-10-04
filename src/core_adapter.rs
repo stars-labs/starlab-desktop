@@ -226,6 +226,7 @@ struct PrimeWatch {
     supply: PrimeSupply,
     since: std::time::Instant,
     was_ready: bool,
+    was_keygen: bool,
 }
 
 impl PrimeWatch {
@@ -234,15 +235,20 @@ impl PrimeWatch {
             was_ready: supply.is_ready(),
             supply,
             since: std::time::Instant::now(),
+            was_keygen: false,
         }
     }
 
-    fn status(&mut self) -> EcdsaSetup {
+    /// `keygen`: a wallet setup's ECDSA step is running. The generator
+    /// starts the next set the moment a setup takes one — which may happen
+    /// between two polls — so the clock also restarts when a setup ends.
+    fn status(&mut self, keygen: bool) -> EcdsaSetup {
         let ready = self.supply.is_ready();
-        if self.was_ready && !ready {
+        if (self.was_ready && !ready) || (self.was_keygen && !keygen && !ready) {
             self.since = std::time::Instant::now(); // a setup took the set
         }
         self.was_ready = ready;
+        self.was_keygen = keygen;
         if ready {
             EcdsaSetup::Ready
         } else {
@@ -254,13 +260,21 @@ impl PrimeWatch {
 }
 
 /// Push this device's ECDSA setup state to the UI once a second.
-fn spawn_prime_status(supply: PrimeSupply, ui_tx: UnboundedSender<UiEvent>) {
+fn spawn_prime_status(
+    supply: PrimeSupply,
+    keygen: Arc<std::sync::atomic::AtomicBool>,
+    ui_tx: UnboundedSender<UiEvent>,
+) {
     tokio::spawn(async move {
         let mut watch = PrimeWatch::new(supply);
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tick.tick().await;
-            if ui_tx.send(UiEvent::EcdsaSetup(watch.status())).is_err() {
+            let running = keygen.load(std::sync::atomic::Ordering::Relaxed);
+            if ui_tx
+                .send(UiEvent::EcdsaSetup(watch.status(running)))
+                .is_err()
+            {
                 return; // app closed
             }
         }
@@ -337,6 +351,8 @@ impl CoreAdapter {
         let signing_slot: SigningSlot = Arc::new(std::sync::Mutex::new(None));
         let signing_for_sync = signing_slot.clone();
         let ui_tx_for_primes = ui_tx.clone();
+        let keygen_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let keygen_for_sync = keygen_flag.clone();
 
         // on_sync: mirror the runner's model into the UI after every message.
         let on_sync = move |model: &Model, msg: Option<&Message>| {
@@ -359,6 +375,8 @@ impl CoreAdapter {
             } else {
                 (0, 0.0)
             };
+            let keygen = ecdsa_keygen_running(model);
+            keygen_for_sync.store(keygen, std::sync::atomic::Ordering::Relaxed);
             let events = [
                 UiEvent::Connected(model.network_state.connected),
                 UiEvent::Peers(connected_peers(model)),
@@ -366,7 +384,7 @@ impl CoreAdapter {
                 UiEvent::Invites(model.session_invites.iter().filter_map(invite).collect()),
                 UiEvent::ActiveSession(model.active_session.as_ref().and_then(invite)),
                 UiEvent::CeremonyOpen(ceremony_open(model)),
-                UiEvent::EcdsaKeygen(ecdsa_keygen_running(model)),
+                UiEvent::EcdsaKeygen(keygen),
                 UiEvent::DkgStatus {
                     active,
                     round,
@@ -388,7 +406,7 @@ impl CoreAdapter {
         } else {
             // "unified" and "secp256k1" both run on the secp256k1 runner;
             // their wallets get the threshold-ECDSA Ethereum key.
-            spawn_prime_status(primes.clone(), ui_tx_for_primes);
+            spawn_prime_status(primes.clone(), keygen_flag, ui_tx_for_primes);
             spawn_secp256k1_runner(device_id, keystore_path, signal_url, primes, on_sync)
         };
         // Unified mode = one ceremony → both curves (ETH+BTC + SOL+Sui in one
@@ -720,14 +738,22 @@ mod tests {
     fn prime_watch_restarts_the_clock_when_a_setup_takes_the_primes() {
         let fixed = insecure_test_primes(0);
         let mut watch = PrimeWatch::new(fixed);
-        assert_eq!(watch.status(), EcdsaSetup::Ready);
+        assert_eq!(watch.status(false), EcdsaSetup::Ready);
 
         let background = PrimeSupply::background();
         let mut watch = PrimeWatch::new(background);
         assert_eq!(
-            watch.status(),
+            watch.status(false),
             EcdsaSetup::Preparing { elapsed_secs: 0 },
             "not started → still to prepare"
+        );
+        // A setup ends without the watch ever seeing the set ready: the
+        // clock restarts for the next set.
+        watch.since -= std::time::Duration::from_secs(300);
+        let _ = watch.status(true);
+        assert_eq!(
+            watch.status(false),
+            EcdsaSetup::Preparing { elapsed_secs: 0 }
         );
     }
 

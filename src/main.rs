@@ -494,7 +494,9 @@ impl State {
                 self.last_signed = self.signing_address().map(|(address, _)| SignedFor {
                     chain: self.sign_chain,
                     message_hex: hex.clone(),
+                    prehashed: false,
                     address,
+                    cosigned: false,
                 });
                 self.pending_action = Some(PendingAction::Sign);
                 self.last_signature.clear();
@@ -511,6 +513,12 @@ impl State {
                 if self.approve_blocker().is_some() {
                     return Task::none();
                 }
+                self.last_signed = self
+                    .signing_request
+                    .as_ref()
+                    .filter(|r| r.id == request_id)
+                    .and_then(|r| self.cosign_target(r));
+                self.last_signature.clear();
                 let adapter = self.adapter.clone();
                 let password = self.passwords.unlock.clone();
                 self.pending_action = Some(PendingAction::CoSign);
@@ -582,13 +590,15 @@ impl State {
             UiEvent::SigningRequest(request) => self.signing_request = request,
             UiEvent::SigningState(state) => self.signing_state = state,
             UiEvent::SigningComplete(signature) => {
-                // A co-signer's copy of the signature belongs to the requester.
-                if self.pending_action == Some(PendingAction::CoSign) {
-                    self.set_status("Co-signed — the requesting device has the signature");
+                // Shown (and verified) either way; a co-signer's copy is
+                // labelled as the requesting device's signature.
+                let cosigned = self.last_signed.as_ref().is_some_and(|s| s.cosigned);
+                self.last_signature = signature;
+                self.set_status(if cosigned {
+                    "Co-signed — the requesting device has the signature too"
                 } else {
-                    self.last_signature = signature;
-                    self.set_status("Signature ready");
-                }
+                    "Signature ready"
+                });
             }
             UiEvent::Message {
                 log_line,
@@ -754,6 +764,27 @@ impl State {
                 "{}-{}-{}",
                 wallet.id, self.sign_chain, self.selected_account
             )
+        })
+    }
+
+    /// What a peer's request asks this device to co-sign: its account's
+    /// address, and the digest the ceremony signs (an Ethereum request
+    /// carries the EIP-191 hash, not the text).
+    fn cosign_target(&self, request: &SigningRequest) -> Option<SignedFor> {
+        let (root, chain, account) =
+            starlab_core::accounts::parse_child_wallet_id(&request.wallet_id)?;
+        let wallet = self.wallets.iter().find(|w| w.id == root)?;
+        let chain = device_chains(self.signing_curve)
+            .into_iter()
+            .find(|(key, _)| *key == chain)?
+            .0;
+        let (address, _) = account_address(wallet, chain, account)?;
+        Some(SignedFor {
+            chain,
+            message_hex: request.message_hex.clone(),
+            prehashed: true,
+            address,
+            cosigned: true,
         })
     }
 
@@ -1413,9 +1444,18 @@ impl State {
         }
         if !self.last_signature.is_empty() {
             let summary = signature_summary(self.last_signed.as_ref(), &self.last_signature);
-            let mut details = Column::new().spacing(4).push(
+            let mut details = Column::new().spacing(4);
+            if self.last_signed.as_ref().is_some_and(|s| s.cosigned) {
+                details = details.push(hint(
+                    "Co-signed for another device's request — it has this signature too.",
+                ));
+            }
+            details = details.push(
                 row![
-                    text(&self.last_signature).size(12).width(Length::Fill),
+                    text(&self.last_signature)
+                        .size(12)
+                        .width(Length::Fill)
+                        .wrapping(iced::widget::text::Wrapping::Glyph),
                     action_button("Copy").on_press(Message::CopySignature),
                 ]
                 .spacing(10)
@@ -1455,8 +1495,13 @@ impl State {
 #[derive(Debug, Clone, PartialEq)]
 struct SignedFor {
     chain: &'static str,
+    /// The message as typed (hex) — or, for a peer's request this device
+    /// co-signed, the 32-byte digest the ceremony signed (`prehashed`).
     message_hex: String,
+    prehashed: bool,
     address: String,
+    /// A peer's request this device co-signed (not our own signing).
+    cosigned: bool,
 }
 
 /// The chains this device signs: a secp256k1 device signs Ethereum with the
@@ -1533,7 +1578,11 @@ fn signature_summary(signed: Option<&SignedFor>, signature_hex: &str) -> Signatu
                 parts.push(format!("s = 0x{}", hex::encode(&rs[32..])));
                 parts.push(format!("v = {v}"));
             }
-            let prehash = starlab_client::utils::eth_helper::eip191_hash(&message);
+            let prehash = if s.prehashed {
+                message.clone()
+            } else {
+                starlab_client::utils::eth_helper::eip191_hash(&message).to_vec()
+            };
             let (verified, verification) =
                 match starlab_core::accounts::recover_ethereum_address(&prehash, &sig) {
                     Ok(addr) if addr.eq_ignore_ascii_case(&s.address) => (
@@ -2153,7 +2202,9 @@ mod tests {
         let signed = SignedFor {
             chain: "ethereum",
             message_hex: "48656c6c6f".to_string(),
+            prehashed: false,
             address: address.clone(),
+            cosigned: false,
         };
         let summary = signature_summary(Some(&signed), &sig);
         assert!(
@@ -2173,7 +2224,9 @@ mod tests {
         let signed = SignedFor {
             chain: "ethereum",
             message_hex: "00".to_string(),
+            prehashed: false,
             address,
+            cosigned: false,
         };
         let summary = signature_summary(Some(&signed), &sig);
         assert!(!summary.verified);
@@ -2181,6 +2234,33 @@ mod tests {
             summary.verification.starts_with("NOT verified"),
             "{summary:?}"
         );
+    }
+
+    /// A co-signer only has the request's EIP-191 digest; it verifies the
+    /// signature against that digest and the request's account address.
+    #[tokio::test]
+    async fn cosigned_ethereum_signature_is_verified_against_the_request_digest() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        with_wallet(&mut state);
+        let request = peer_request("9c1f4e2ab37d-ethereum-0", "00");
+        let target = state.cosign_target(&request).expect("our wallet's account");
+        assert!(target.cosigned && target.prehashed);
+        assert_eq!(
+            Some(target.address.clone()),
+            state.signing_address().map(|(a, _)| a),
+            "Ethereum account 0 of the ECDSA key"
+        );
+        // A signature over a digest by a known key, checked as prehashed.
+        let (sig, address) = eth_sign(b"Hello");
+        let digest = starlab_client::utils::eth_helper::eip191_hash(b"Hello");
+        let signed = SignedFor {
+            message_hex: hex::encode(digest),
+            address,
+            ..target
+        };
+        assert!(signature_summary(Some(&signed), &sig).verified);
+        let _ = std::fs::remove_dir_all(keystore);
     }
 
     #[test]
