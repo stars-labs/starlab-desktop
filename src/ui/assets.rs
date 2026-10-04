@@ -56,3 +56,14 @@ pub(crate) fn glyph(icon: Glyph, size: f32) -> Element<'static, Message> {
         .height(size)
         .into()
 }
+
+/// Locally authored radial color fields, not a backdrop blur or a shader.
+pub(crate) fn ambient_light() -> Element<'static, Message> {
+    svg(svg::Handle::from_memory(
+        include_bytes!("assets/ambient.svg").as_slice(),
+    ))
+    .width(iced::Length::Fill)
+    .height(iced::Length::Fill)
+    .content_fit(iced::ContentFit::Fill)
+    .into()
+}

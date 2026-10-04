@@ -10,3 +10,5 @@ Downloaded 4 October 2026. Native assets are local so the wallet does not send b
 These native-chain marks use the same packaged image bytes as the Starlab browser extension. Unknown chains receive a neutral icon. The desktop does not infer identity from a token ticker or display an issuer verification badge. No claim of affiliation or endorsement.
 
 Navigation glyphs in `assets.rs` are locally authored stroke SVGs.
+
+`ambient.svg` is locally authored radial-gradient lighting, with no external asset or blur filter.

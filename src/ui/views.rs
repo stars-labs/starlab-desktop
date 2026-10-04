@@ -1,4 +1,4 @@
-use super::assets::{Glyph, chain_icon, glyph};
+use super::assets::{Glyph, ambient_light, chain_icon, glyph};
 use super::components::*;
 use super::theme::*;
 use crate::*;
@@ -9,24 +9,27 @@ use iced::{Alignment, Element, Length};
 
 impl State {
     pub(crate) fn view(&self) -> Element<'_, Message> {
-        container(
-            column![
-                self.header(),
-                row![
-                    container(self.sidebar()).width(Length::Fixed(260.0)),
-                    container(self.main_panel())
-                        .width(Length::Fill)
-                        .max_width(1000),
+        iced::widget::stack![
+            ambient_light(),
+            container(
+                column![
+                    self.header(),
+                    row![
+                        container(self.sidebar()).width(Length::Fixed(260.0)),
+                        container(self.main_panel())
+                            .width(Length::Fill)
+                            .max_width(1000),
+                    ]
+                    .spacing(24)
+                    .height(Length::Fill),
+                    self.status_bar(),
                 ]
-                .spacing(24)
-                .height(Length::Fill),
-                self.status_bar(),
-            ]
-            .spacing(14),
-        )
-        .padding(24)
-        .width(Length::Fill)
-        .height(Length::Fill)
+                .spacing(14),
+            )
+            .padding(24)
+            .width(Length::Fill)
+            .height(Length::Fill)
+        ]
         .into()
     }
 
