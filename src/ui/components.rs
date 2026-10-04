@@ -23,9 +23,9 @@ pub(crate) fn card<'a>(title: &'a str, body: Element<'a, Message>) -> Element<'a
                 .align_y(Alignment::Center),
             body
         ]
-        .spacing(16),
+        .spacing(12),
     )
-    .padding(20)
+    .padding(16)
     .width(Length::Fill)
     .style(panel_style)
     .into()

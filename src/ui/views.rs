@@ -15,18 +15,18 @@ impl State {
                 column![
                     self.header(),
                     row![
-                        container(self.sidebar()).width(Length::Fixed(260.0)),
+                        container(self.sidebar()).width(Length::Fixed(240.0)),
                         container(self.main_panel())
                             .width(Length::Fill)
                             .max_width(1000),
                     ]
-                    .spacing(24)
+                    .spacing(12)
                     .height(Length::Fill),
                     self.status_bar(),
                 ]
                 .spacing(14),
             )
-            .padding(24)
+            .padding(16)
             .width(Length::Fill)
             .height(Length::Fill)
         ]
@@ -88,7 +88,7 @@ impl State {
     // ---- Sidebar ----
 
     fn sidebar(&self) -> Element<'_, Message> {
-        let mut items = column![self.wallets_card()].spacing(16);
+        let mut items = column![self.wallets_card()].spacing(12);
         items = items.push(
             column![
                 tab_button("Set up wallet", Tab::Setup, self.active_tab).width(Length::Fill),
@@ -250,7 +250,7 @@ impl State {
     }
 
     fn backup_tab(&self) -> Element<'_, Message> {
-        let mut body = column![hint("Keep an encrypted backup of this device's wallet share. A backup never contains the complete wallet key.")].spacing(16);
+        let mut body = column![hint("Keep an encrypted backup of this device's wallet share. A backup never contains the complete wallet key.")].spacing(12);
         let backup = if self.wallets.is_empty() {
             self.import_blocker()
         } else {
@@ -312,7 +312,7 @@ impl State {
 
     fn ceremony_details(&self) -> Element<'_, Message> {
         let mut body =
-            column![hint("Keep every device online until your wallet is ready.")].spacing(16);
+            column![hint("Keep every device online until your wallet is ready.")].spacing(12);
         if let Some(session) = &self.active_session {
             body = body.push(
                 text(format!(
@@ -420,7 +420,7 @@ impl State {
         body = body.push(ceremony_steps(if self.dkg_active { 1 } else { 0 }));
         Some(
             container(body)
-                .padding(20)
+                .padding(16)
                 .width(Length::Fill)
                 .style(highlight_style)
                 .into(),
@@ -456,7 +456,7 @@ impl State {
             ]
             .spacing(8),
         )
-        .padding(20)
+        .padding(16)
         .width(Length::Fill)
         .style(highlight_style)
         .into()
@@ -553,7 +553,7 @@ impl State {
         body = body.push(actions);
         Some(
             container(body)
-                .padding(20)
+                .padding(16)
                 .width(Length::Fill)
                 .style(highlight_style)
                 .into(),
@@ -842,7 +842,7 @@ impl State {
                     hint("Wallet setup, signatures and backups will appear here.")
                 ]
                 .spacing(12)
-                .padding(20),
+                .padding(16),
             );
         }
         for line in self.log_messages.iter().rev() {
@@ -899,7 +899,7 @@ impl State {
                 .on_press(Message::ToggleActivityDetails),
                 lines
             ]
-            .spacing(16)
+            .spacing(12)
             .into(),
         )
     }
