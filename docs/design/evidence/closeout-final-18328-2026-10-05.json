@@ -1,0 +1,143 @@
+{
+  "source": "commit containing this manifest; source_inputs identify exact validated bytes",
+  "source_base": "b8dd0d624cc35e5f6ce3f84138ee5f1f89aef02b",
+  "engine_git_rev": "18328a1b8f6d04c769818036b2a0b835c58d22bb",
+  "release": {
+    "path": "/tmp/starlab-desktop-versioned-releases/final-18328a1b/starlab-desktop",
+    "sha256": "f816a9ed856dc6a39efec7c2b2550ace938c681bd93b558f0b565b4e9cfbb432"
+  },
+  "checks": {
+    "locked_tests": {
+      "passed": 51,
+      "failed": 0,
+      "ignored": 1
+    },
+    "fmt": "passed",
+    "strict_all_target_clippy": "passed",
+    "locked_release": "passed;219 seconds",
+    "current_pin_three_adapter_integration": "passed;32.99 seconds; 2-of-3 DKG, Ethereum account1 recovery, encrypted FROST export/import; deterministic fixture primes"
+  },
+  "failure_regression": {
+    "before": "c708 real runner regression fails in0.16s: failed setup must close before presenting retry",
+    "after": "18328 actual runner create\u2192DKGFailed\u2192setup/keygen/DKG stopped\u2192fresh create retry passes; shared engine cleanup, no Desktop cancellation workaround",
+    "presentation": "actionable plain-English status; full original engine error in log"
+  },
+  "native": {
+    "backend": "tiny-skia",
+    "display": ":166",
+    "viewports": [
+      [
+        1440,
+        900
+      ],
+      [
+        1024,
+        768
+      ]
+    ],
+    "scope": "isolated blank keystore; localhost refused signal URL; no real wallet, card or transaction",
+    "actions": "navigation, keyboard focus/Tab, normal\u2192narrow resize, exhausted connection failure, same-server Connect retry",
+    "retry_proof": "native log new Attempting to reconnect at18:49:51.105468Z after initial terminal failure18:49:37.639050Z; immediate refusal returns to Offline, so retry screenshot does not claim prolonged Connecting state",
+    "review": "full normal setup/focus and narrow setup/activity/error inspected: readable compact layout, no shadow trails"
+  },
+  "screenshots": [
+    {
+      "file": "/tmp/starlab-desktop-final-18328-native-shots/01-normal-setup.png",
+      "sha256": "1525547ace3aee67d5a0eba70ee4cd6ad5253a09c2a9f92f21903a15dcc270e5"
+    },
+    {
+      "file": "/tmp/starlab-desktop-final-18328-native-shots/02-normal-focus.png",
+      "sha256": "2d9f2a32c11f74207526067966b4a0011e3e9b05a8c031c912c374e6c01ea4ac"
+    },
+    {
+      "file": "/tmp/starlab-desktop-final-18328-native-shots/03-normal-connection.png",
+      "sha256": "cf82aae8e08ccf4303aafc9e4fc2ec5e43baed6f09a95345d6fb5cc62826f384"
+    },
+    {
+      "file": "/tmp/starlab-desktop-final-18328-native-shots/04-narrow-connection.png",
+      "sha256": "ca480223a5cf5c564c5e8bd161b8882a68446cd549ef434868a435cf87ee5a32"
+    },
+    {
+      "file": "/tmp/starlab-desktop-final-18328-native-shots/05-terminal-failure.png",
+      "sha256": "ca480223a5cf5c564c5e8bd161b8882a68446cd549ef434868a435cf87ee5a32"
+    },
+    {
+      "file": "/tmp/starlab-desktop-final-18328-native-shots/06-same-server-retry.png",
+      "sha256": "38187decd8b301d59215f27bf7a482f4031639deb33dad4741a001a9514fedeb"
+    },
+    {
+      "file": "/tmp/starlab-desktop-final-18328-native-shots/07-narrow-setup.png",
+      "sha256": "ef719df0b3842ff634df164a9869b059744a5f5e6734a1aa25ade0554f70005c"
+    },
+    {
+      "file": "/tmp/starlab-desktop-final-18328-native-shots/08-narrow-activity.png",
+      "sha256": "68032402f03df8783bb679b9fa88e906975378494c4b9fc9f92142e7b7dd0848"
+    }
+  ],
+  "source_inputs": [
+    {
+      "file": "Cargo.toml",
+      "sha256": "40482e98ac8363f8cdbf2d463cf333f2239cca769bd89007e56134e708081fbc"
+    },
+    {
+      "file": "Cargo.lock",
+      "sha256": "9b38c796e765f495dd20a72eaafd70e3a24ec050e5af18ea9882ec1841452d85"
+    },
+    {
+      "file": "src/core_adapter.rs",
+      "sha256": "e19779217bbc250569840051c8698f7ade8c55b9fcd9826edb08f26b67d887a5"
+    },
+    {
+      "file": "src/main.rs",
+      "sha256": "4994bad3a8db25a6c2ac9ace14965c4eaa11cd8e2081210650cb5b02efe2683e"
+    },
+    {
+      "file": "src/ui/assets.rs",
+      "sha256": "00db9daecddb018d8959cbde9d4a9c50a0b8be010bc13b8a6a0fc7acb90ff66b"
+    },
+    {
+      "file": "src/ui/components.rs",
+      "sha256": "fd41bfd3055d42efc3e8e663bebbe353a64ba0bd91839f4bb6e170469f51121c"
+    },
+    {
+      "file": "src/ui/mod.rs",
+      "sha256": "660b163a8d44ad4e8224afda3a70e50c8c91c9a2a3d542938e909cb20db873e9"
+    },
+    {
+      "file": "src/ui/theme.rs",
+      "sha256": "9ed0f3374f78d861645b7695b2f48a92a5d766808e44336200563ef73423cb9a"
+    },
+    {
+      "file": "src/ui/views.rs",
+      "sha256": "7da1668de2bd3ed30b85d95bd30f612884a851e48ecaaf1215a9e2d65315cbd3"
+    },
+    {
+      "file": "src/ui_callback.rs",
+      "sha256": "1727b6e7a7a99b80c0c6ff93782edb7f21139b457c576c8719fa3b1069fcc934"
+    }
+  ],
+  "logs": [
+    "/tmp/starlab-desktop-final-18328-lock.log",
+    "/tmp/starlab-desktop-final-18328-tests.log",
+    "/tmp/starlab-desktop-final-18328-fmt.log",
+    "/tmp/starlab-desktop-final-18328-clippy.log",
+    "/tmp/starlab-desktop-final-18328-release.log",
+    "/tmp/starlab-desktop-final-18328-integration.log",
+    "/tmp/starlab-desktop-final-18328-native.log"
+  ],
+  "baseline_ci": {
+    "head": "b8dd0d6",
+    "engine": "031e81f3",
+    "runs": [
+      37220701899,
+      37220698894
+    ],
+    "result": "both success; separate previous pin baseline"
+  },
+  "remaining": [
+    "Remote CI for this new source head pending",
+    "Signed installers/platform distribution not implemented",
+    "Physical YubiKey/browser signing unverified"
+  ],
+  "historical_live_crypto": "ae34bc6 desktop/fab8e166 engine/e18da4c extension; real fresh-prime wallet/Sepolia proof remains separately versioned, no new transaction claimed"
+}
