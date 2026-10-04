@@ -81,6 +81,9 @@ backend selection remains unchanged.
 
 ## Dependency note
 
-`starlab-client` is a git dependency on `starlab-mpc`. While threshold ECDSA is
-being integrated it tracks the `feat/ecdsa-cggmp24` branch; it goes back to
-`main` when that branch merges. For releases, pin it to a tag or rev.
+`starlab-client`, `starlab-core`, and the test signal server share the pinned
+engine revision `3c5982d0d458fce1a04c393a679fb5a91a2a168f`. This is the pushed
+integrated ECDSA engine, including the fixes reviewed in engine PR135.
+`Cargo.lock` records the same revision, so the committed desktop builds and
+tests reproduce the reviewed engine without a local dependency override.
+Update all three revisions together when adopting a subsequent engine release.
