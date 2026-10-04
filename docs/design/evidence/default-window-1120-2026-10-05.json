@@ -2,7 +2,7 @@
   "source": "commit containing this manifest; exact source_inputs hashes below",
   "base_head": "c1ff263bf6190339f03d38ea618a994655a13007",
   "engine_git_rev": "18328a1b8f6d04c769818036b2a0b835c58d22bb",
-  "change": "One presentation line sets default window1120\u00d7680; resizable/maximizable default policy and typography unchanged. Logical area38080px smaller than1024\u00d7768 (4.84%); height88px shorter, width96px wider.",
+  "change": "One presentation line sets default window 1120\u00d7680; resizable/maximizable policy and typography unchanged. Logical area 24832 pixels smaller than 1024\u00d7768 (3.16%); height 88 pixels shorter, width 96 pixels wider.",
   "release": {
     "path": "/tmp/starlab-desktop-versioned-releases/default-1120-18328/starlab-desktop",
     "sha256": "c2f2733b548fb7010de952a6d9cd338860125308e7124a25911c0c38148a86e9"
