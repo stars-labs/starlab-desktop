@@ -588,6 +588,14 @@ impl State {
                 }
                 self.connected = connected;
             }
+            UiEvent::ConnectionFailed => {
+                self.connected = false;
+                self.connected_url = None;
+                self.set_status(
+                    "Could not connect. Check the signal server and room, then try Connect again.",
+                );
+                self.status_is_error = true;
+            }
             UiEvent::Peers(peers) => self.peers = peers,
             UiEvent::Wallets(wallets) => {
                 // A new wallet (startup load or a finished setup) → go sign.
@@ -1261,6 +1269,25 @@ mod tests {
         let mut ui = simulator(state.view());
         ui.click(label).unwrap_or_else(|e| panic!("{label}: {e}"));
         ui.into_messages().collect()
+    }
+
+    #[tokio::test]
+    async fn failed_connection_shows_error_and_allows_retry_without_editing_url() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Connection;
+        state.connected_url = Some(state.signal_url());
+        state.apply_ui_event(UiEvent::ConnectionFailed);
+        assert!(!state.connected);
+        assert!(state.status_is_error);
+        assert!(state.status.contains("Could not connect"));
+        assert!(state.network_changed());
+        assert!(matches!(
+            clicked(&state, "Connect").as_slice(),
+            [Message::Connect]
+        ));
+        assert!(simulator(state.view()).find("Offline").is_ok());
+        let _ = std::fs::remove_dir_all(keystore);
     }
 
     #[tokio::test]

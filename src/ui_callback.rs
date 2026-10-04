@@ -91,6 +91,7 @@ pub struct Invite {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     Connected(bool),
+    ConnectionFailed,
     /// Peers with an open WebRTC data channel to this device.
     Peers(usize),
     Wallets(Vec<WalletView>),

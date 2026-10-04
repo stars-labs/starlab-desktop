@@ -16,8 +16,10 @@ keystore code as the terminal client, a different shell.
 ## Build & run
 
 ```bash
-cargo run            # build + launch the desktop app
-cargo build
+nix develop
+cargo run --locked                    # build + launch
+cargo build --locked --release        # optimized app
+./target/release/starlab-desktop
 ```
 
 Needs graphics/system libs (wgpu/winit + fontconfig/freetype, plus Wayland/X11
@@ -27,6 +29,45 @@ for your platform.
 Set `MPC_KEYSTORE_PATH` to use a separate keystore directory (the default is
 `~/.frost_keystore`). `MPC_DEVICE_ID`, `MPC_SIGNAL_SERVER`, and `MPC_ROOM`
 configure the device and its signaling connection.
+
+## Use your wallet
+
+1. Under **Connection & devices**, give all devices the same signal server and
+   room ID. Use a different device ID on each device and wait for Connected.
+2. Under **Set up wallet**, create a named wallet and choose a password of at
+   least eight characters. Share the invite ID with the other two devices;
+   each joins with its own password. Keep all three devices online through
+   setup. Ethereum preparation can take several minutes.
+3. Select your wallet and account in the sidebar. Under **Sign message**,
+   choose the chain and enter the message as hex bytes. Signing needs any two
+   of the three devices. On the other device, review the wallet, account,
+   chain and digest, then approve with that device's password or reject.
+   Review the full message on the requesting device. This desktop signs
+   messages; it does not provide a transaction composer or broadcast button.
+4. Under **Backup & restore**, export this device's encrypted shares using
+   its password. Keep every exported curve file together. Import a file or
+   folder to restore a device's shares. An export is one device's share,
+   so it alone cannot recover or sign for the wallet.
+
+Reopening with the same keystore directory loads its saved wallets. A
+password is still required to sign or export. A separate `MPC_KEYSTORE_PATH`
+starts a separate device store. If connection fails, correct the server or
+room under Connection & devices and reconnect; cancel an active setup before
+switching rooms. Incorrect passwords and invalid hex are shown inline.
+
+`MPC_CURVE=ed25519` enables the Solana/Sui FROST path; the default
+`secp256k1` enables Bitcoin Taproot. Select the matching configuration on all
+participants before creating or opening that wallet.
+
+## Distribution and checks
+
+This repository currently provides source builds, not signed installers or
+self-contained release packages. The release executable still requires its
+platform's graphics/windowing libraries; use the Nix development shell on
+Linux. macOS and Windows installation packages have not been verified here.
+The Linux CI workflow checks formatting, locked tests, strict Clippy and a
+locked release build. The ignored crypto integration test and visual/native
+window checks remain explicit validation runs rather than CI claims.
 
 ## Architecture
 

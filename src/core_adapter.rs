@@ -405,6 +405,13 @@ impl CoreAdapter {
             for event in events {
                 let _ = ui_tx.send(event);
             }
+            if matches!(msg, Some(Message::WebSocketDisconnected))
+                && !model.network_state.connected
+                && model.network_state.reconnect_attempts
+                    >= model.network_state.max_reconnect_attempts
+            {
+                let _ = ui_tx.send(UiEvent::ConnectionFailed);
+            }
         };
         let state = Arc::new(CoreState::new());
         let wallet_manager = Arc::new(
