@@ -1,0 +1,534 @@
+{
+  "source_commit": "a5b4e7531349c1c4dbbeba9f706c02db6838925c",
+  "scope": "Presentation spacing only; debug snapshot harness, not a new release binary or live transaction",
+  "checks": {
+    "tests": "49 passed, 0 failed, 1 ignored",
+    "clippy": "locked all targets strict pass",
+    "snapshots": "58 captures; harness 1 passed, 0 failed, 376.78s",
+    "format": "pass"
+  },
+  "captures": [
+    {
+      "file": "normal/1-offline-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "1-offline",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "7b4bf48e87e9c6b0b0272a2990311d8c0fa8b88e7786e6d188b4fbe9912f72df"
+    },
+    {
+      "file": "narrow/1-offline-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "1-offline",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "5bf76e1ad4456051af4f0570938b2a745a4ae048cabe974cb1366cc0a2dfc2f8"
+    },
+    {
+      "file": "normal/2-create-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "2-create",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "5882231f1280c5749006715df9722085becca0cf6d7c3d3d801e11dba68718d2"
+    },
+    {
+      "file": "narrow/2-create-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "2-create",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "25ffdd6494b4679d7ccad4ed506b48154467cbb7e4c67fcce24f3f481d846167"
+    },
+    {
+      "file": "normal/3-join-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "3-join",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "9b19a645970bb9a8b6d34bbc2d0f3e35b4e5be66f6883d43020c646e27cdb4d1"
+    },
+    {
+      "file": "narrow/3-join-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "3-join",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "a12e1a9258b70217e144ba5fe5a47d7e5aebd4d624fb5e5acdc16cdbd603eec6"
+    },
+    {
+      "file": "normal/4-waiting-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "4-waiting",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "d28ba90339da3d51ab07f551d85f5c1a10a3aa605abef7f6db6cec56e2cc9914"
+    },
+    {
+      "file": "narrow/4-waiting-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "4-waiting",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "04c45dfa1eb7b5c498539bb2318ebef27e77f877e98551fade6488feda1269a0"
+    },
+    {
+      "file": "normal/5-sign-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "5-sign",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "6f7950d183438359ef52e69c0592f16daf0259ca6ef5e5d4ad9d0a8416cef722"
+    },
+    {
+      "file": "narrow/5-sign-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "5-sign",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "efb0b16dded9f697b4288786572503bd61aff686f60cd2b28f4892cb449d0e89"
+    },
+    {
+      "file": "normal/06-wallet-sign-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "06-wallet-sign",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "9ba11c0cdc34032de1b0bd0c7a8c141c43870f01a068228e742692e2ad2b4d0f"
+    },
+    {
+      "file": "narrow/06-wallet-sign-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "06-wallet-sign",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "3bb7b6ad934bdeb23d2788f773c8be8dbdc57d23dde7442335ffb76b7c4076c9"
+    },
+    {
+      "file": "normal/07-connection-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "07-connection",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "ccf3e76069dce13992f237f9acf12e69c9541b01246127ddef878f1e59d22b6e"
+    },
+    {
+      "file": "narrow/07-connection-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "07-connection",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "b93a07ea35faa8c1285152d12c2c5b398d0cef9e994cfa1d6f51eabbaadd715c"
+    },
+    {
+      "file": "normal/08-connection-invalid-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "08-connection-invalid",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "e17e7955199386b8d97aac64fdacd37eb1138c0328b83718329b3277619e798e"
+    },
+    {
+      "file": "narrow/08-connection-invalid-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "08-connection-invalid",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "0670d1775af0827b1d841d88728a09be7efdf2d34017044bb8f06e87dc44e89f"
+    },
+    {
+      "file": "normal/09-backup-locked-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "09-backup-locked",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "f25d719eb66a8a51328b75a015570091c043255e5fe7c6cf31562dcd7ddc54f9"
+    },
+    {
+      "file": "narrow/09-backup-locked-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "09-backup-locked",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "478ebff19cb992734b7272371dc4e311d6b18b2c778d105538d308c2ceab0042"
+    },
+    {
+      "file": "normal/10-backup-ready-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "10-backup-ready",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "92cc12484fb1bc91ab23d33f0df933192fa69c53ba36ce8c3896d969b4cabdfd"
+    },
+    {
+      "file": "narrow/10-backup-ready-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "10-backup-ready",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "cf6da3a7cb202a636e6ca5b497d2f413d5c2b6f9f191d956bc209b4ddbbe8ce0"
+    },
+    {
+      "file": "normal/11-backup-error-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "11-backup-error",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "fdafe03610ec4b643ec199f46877b38501c7d3b2e4a64e1a989b452b231d5ad3"
+    },
+    {
+      "file": "narrow/11-backup-error-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "11-backup-error",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "70547345ca3e617035a8d3858ce6998e33f744c271c87ede45e964ad735fae4f"
+    },
+    {
+      "file": "normal/12-backup-success-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "12-backup-success",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "ab8b6926b3701ebe2bf50993777dbab81ed64b4bf72592b5feb356b503a11420"
+    },
+    {
+      "file": "narrow/12-backup-success-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "12-backup-success",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "c12e01d481894fb70671ef70d34dcfc273dc04945c0b98b9ac0171c98cda2fd2"
+    },
+    {
+      "file": "normal/13-setup-primes-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "13-setup-primes",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "1e2fad8be0a0d9352719656150560fda1c52d49a8e21d222b17f29c88ce6caf6"
+    },
+    {
+      "file": "narrow/13-setup-primes-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "13-setup-primes",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "e59e059658d4e92543ee1b658a572b0091387539bdef99bedd32b401c668e907"
+    },
+    {
+      "file": "normal/14-setup-aux-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "14-setup-aux",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "256ae9e26025a8e76f6f22a2f1c7939c43879b8d159e468e70d23ba3918ee17d"
+    },
+    {
+      "file": "narrow/14-setup-aux-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "14-setup-aux",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "d66fade2c1550fada94974f733ee431e755bc9604331f95e51d9d6b8d09c3e6d"
+    },
+    {
+      "file": "normal/15-setup-keygen-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "15-setup-keygen",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "8700f35619e63df8cd7ea7ab0f36089f19639b90d7fe22d128b50c1b6820e754"
+    },
+    {
+      "file": "narrow/15-setup-keygen-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "15-setup-keygen",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "a955af3b31d9d6124a587484f2b23ef78880e275f1941c077b86125616271069"
+    },
+    {
+      "file": "normal/15b-setup-failed-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "15b-setup-failed",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "0f27547a891bafd5116668cb7fa36747b625dd775a051e938b031a02cef6e193"
+    },
+    {
+      "file": "narrow/15b-setup-failed-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "15b-setup-failed",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "ebf6d36431434ffd5b2c9277dfb0e6d178a925bad05346ec9affdc1912c9a78c"
+    },
+    {
+      "file": "normal/16-wallets-accounts-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "16-wallets-accounts",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "d7384a48ad88fec38872d41350f338c15d232dcc19d10b583b6ef402849813bf"
+    },
+    {
+      "file": "narrow/16-wallets-accounts-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "16-wallets-accounts",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "0adb457b2efac7ad4d89aa494b25fa4bec1154bfe89ac5464f841eb995a94b8b"
+    },
+    {
+      "file": "normal/17-sign-invalid-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "17-sign-invalid",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "e5e7d3a03803034c1c4480082ffbfe76117b53bd5755049b576fea1ec469ce08"
+    },
+    {
+      "file": "narrow/17-sign-invalid-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "17-sign-invalid",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "08e3ba8a5b94beb935f583d25c42e2f1f2814fa7d317e969c80f092c8bd5fcdd"
+    },
+    {
+      "file": "normal/18-approval-password-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "18-approval-password",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "304ec8a3a15f3077dc942fea075440a749489d8056324ddab8f073f055e55ab6"
+    },
+    {
+      "file": "narrow/18-approval-password-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "18-approval-password",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "b49f8e28a29a81ed415f54be69232a10fc8d689bbc112416bdb5075d95ee3383"
+    },
+    {
+      "file": "normal/19-approval-working-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "19-approval-working",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "54aab72465ac36bcb42555db0be44cf5f3ec7237b5ec99a7518a834de56dc4cc"
+    },
+    {
+      "file": "narrow/19-approval-working-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "19-approval-working",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "5e77800b2eb9a4c77864a50b0a991a0f0e20827b7536ed2b874318ba5c496f9e"
+    },
+    {
+      "file": "normal/20-approval-declined-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "20-approval-declined",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "2660894782081bd5d23e5b8a89ad9601d33b21cea2d40f421ccfbaeed05d773a"
+    },
+    {
+      "file": "narrow/20-approval-declined-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "20-approval-declined",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "6a0ad17e7f82b1cc62d84c83525c7c944a3d817ae009e154773b9da87b403c2d"
+    },
+    {
+      "file": "normal/20b-approval-password-error-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "20b-approval-password-error",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "0aa184d62dfdaae91812d7daff046258d3f5909c2f5e3f47d255492a52c22ab8"
+    },
+    {
+      "file": "narrow/20b-approval-password-error-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "20b-approval-password-error",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "c67622e24e82ca11117db8688f5bdb51d5cd13d94bc64654a023a945fc291fee"
+    },
+    {
+      "file": "normal/21-signature-verified-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "21-signature-verified",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "6a5d884ae6f281439dd4c67046aac4fa524f42460da36bfe3bddf1077c5ae12d"
+    },
+    {
+      "file": "narrow/21-signature-verified-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "21-signature-verified",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "04b2e7dc92e72aa10aebb3e44119407e6b58377e9e242c9e1d281ab47bc8b73f"
+    },
+    {
+      "file": "normal/21b-bitcoin-sign-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "21b-bitcoin-sign",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "88721008568675db88c0d652fc9ad397de44e48ab97e208265ee4e9351ce4869"
+    },
+    {
+      "file": "narrow/21b-bitcoin-sign-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "21b-bitcoin-sign",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "d2bb24e13ad277de0af25f4c75cadcf9fe76158ef47fa0e5e3c91dfc4cc091e3"
+    },
+    {
+      "file": "normal/22-activity-empty-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "22-activity-empty",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "4b5a8c516ff44e977a25cbdd7de621d87fb968841e1cff4b51c130369d020c1e"
+    },
+    {
+      "file": "narrow/22-activity-empty-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "22-activity-empty",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "ec044f5f1c43de4820e080555558718254c0988e11e3f98b52295cf0839a9e79"
+    },
+    {
+      "file": "normal/23-activity-events-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "23-activity-events",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "1474df8d089cc2d488fa57162298db2d90b0c3a4b93da76c5d6b344509c93153"
+    },
+    {
+      "file": "narrow/23-activity-events-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "23-activity-events",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "ae86c57b7e0011553e209a6c0e4a8f6f057507646174f8537e35452a99b1f2d5"
+    },
+    {
+      "file": "normal/24-activity-details-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "24-activity-details",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "5bb2ca9100fba2faafe04a77be1707adf97c1a17c8fd1037deaa8bb232940f69"
+    },
+    {
+      "file": "narrow/24-activity-details-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "24-activity-details",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "8443d2fc5901dc8eb4da3f885181ab6e1fb92ab03c8e433753cb116c8a7fafe4"
+    },
+    {
+      "file": "normal/25-solana-sign-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "25-solana-sign",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "1217d86e25844fcc850779fea5fad4412b4f64c8da3b7202ec4cd603077d91ad"
+    },
+    {
+      "file": "narrow/25-solana-sign-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "25-solana-sign",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "5406718d0425add5aad949befae4244817c8431cf337a03be319c358852f8d95"
+    },
+    {
+      "file": "normal/26-sui-sign-tiny-skia.png",
+      "height": 900.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "26-sui-sign",
+      "viewport": "normal",
+      "width": 1440.0,
+      "sha256": "2fb6f70ddddfc853de4eca31b0f708b1b2cc373a173562bf65f03ee3a0acff61"
+    },
+    {
+      "file": "narrow/26-sui-sign-tiny-skia.png",
+      "height": 768.0,
+      "provenance": "public fixture data; no private shares",
+      "state": "26-sui-sign",
+      "viewport": "narrow",
+      "width": 1024.0,
+      "sha256": "d8e68ffdfb6284cb35b4b62430c0af5fcb94379d2d48ca651973a88104407a7a"
+    }
+  ]
+}
