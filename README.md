@@ -24,6 +24,10 @@ Needs graphics/system libs (wgpu/winit + fontconfig/freetype, plus Wayland/X11
 on Linux). `nix develop` provides them all; otherwise install the equivalents
 for your platform.
 
+Set `MPC_KEYSTORE_PATH` to use a separate keystore directory (the default is
+`~/.frost_keystore`). `MPC_DEVICE_ID`, `MPC_SIGNAL_SERVER`, and `MPC_ROOM`
+configure the device and its signaling connection.
+
 ## Architecture
 
 ```

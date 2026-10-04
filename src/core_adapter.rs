@@ -392,7 +392,10 @@ impl CoreAdapter {
                 UiEvent::Invites(model.session_invites.iter().filter_map(invite).collect()),
                 UiEvent::ActiveSession(model.active_session.as_ref().and_then(invite)),
                 UiEvent::CeremonyOpen(ceremony_open(model)),
-                UiEvent::EcdsaKeygen(keygen),
+                UiEvent::EcdsaKeygen {
+                    running: keygen,
+                    phase: model.wallet_state.ecdsa_dkg_phase,
+                },
                 UiEvent::DkgStatus {
                     active,
                     round,

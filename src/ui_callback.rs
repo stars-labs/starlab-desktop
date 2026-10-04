@@ -106,7 +106,10 @@ pub enum UiEvent {
     CeremonyOpen(bool),
     /// The FROST keys of the running wallet setup are done and its Ethereum
     /// key (threshold ECDSA: safe primes → aux info → keygen) is being made.
-    EcdsaKeygen(bool),
+    EcdsaKeygen {
+        running: bool,
+        phase: Option<starlab_client::protocal::ecdsa::DkgPhase>,
+    },
     /// This device's safe-prime generator, polled once a second.
     EcdsaSetup(EcdsaSetup),
     /// The signing manager's current request: ours while we sign, or a

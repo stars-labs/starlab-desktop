@@ -24,6 +24,7 @@ use iced::{Alignment, Background, Border, Color, Element, Length, Subscription, 
 
 use core_adapter::{CoreAdapter, DEFAULT_THRESHOLD, DEFAULT_TOTAL};
 use starlab_client::core::{SigningRequest, SigningState};
+use starlab_client::protocal::ecdsa::DkgPhase;
 use ui_callback::{EcdsaSetup, Invite, UiEvent, WalletView};
 
 // ---------------------------------------------------------------------------
@@ -175,10 +176,15 @@ impl Config {
             device_id: std::env::var("MPC_DEVICE_ID")
                 .unwrap_or_else(|_| "native-node-001".to_string()),
             // Keystore lives alongside the TUI's (~/.frost_keystore).
-            keystore_path: format!(
-                "{}/.frost_keystore",
-                std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-            ),
+            keystore_path: std::env::var("MPC_KEYSTORE_PATH")
+                .ok()
+                .filter(|path| !path.trim().is_empty())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}/.frost_keystore",
+                        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+                    )
+                }),
             server_url,
             room: std::env::var("MPC_ROOM")
                 .ok()
@@ -222,6 +228,7 @@ pub struct State {
     ceremony_open: bool,
     /// FROST done, the Ethereum (threshold-ECDSA) key is being made.
     ecdsa_keygen: bool,
+    ecdsa_phase: Option<DkgPhase>,
     /// This device's safe-prime generator (the next wallet's ECDSA setup).
     ecdsa_setup: EcdsaSetup,
     dkg_active: bool,
@@ -293,6 +300,7 @@ impl State {
             active_session: None,
             ceremony_open: false,
             ecdsa_keygen: false,
+            ecdsa_phase: None,
             ecdsa_setup: if signing_curve == "ed25519" {
                 EcdsaSetup::NotNeeded
             } else {
@@ -585,7 +593,10 @@ impl State {
                 self.dkg_progress = progress;
             }
             UiEvent::CeremonyOpen(open) => self.ceremony_open = open,
-            UiEvent::EcdsaKeygen(running) => self.ecdsa_keygen = running,
+            UiEvent::EcdsaKeygen { running, phase } => {
+                self.ecdsa_keygen = running;
+                self.ecdsa_phase = phase;
+            }
             UiEvent::EcdsaSetup(setup) => self.ecdsa_setup = setup,
             UiEvent::SigningRequest(request) => self.signing_request = request,
             UiEvent::SigningState(state) => self.signing_state = state,
@@ -1143,7 +1154,7 @@ impl State {
     /// is being made — waiting for this device's safe primes first if they
     /// aren't ready yet.
     fn ecdsa_keygen_banner(&self) -> Element<'_, Message> {
-        let (detail, progress) = ecdsa_keygen_detail(self.ecdsa_setup);
+        let (detail, progress) = ecdsa_keygen_detail(self.ecdsa_phase, self.ecdsa_setup);
         container(
             column![
                 row![
@@ -1633,9 +1644,9 @@ fn signature_summary(signed: Option<&SignedFor>, signature_hex: &str) -> Signatu
 }
 
 /// Detail line + progress for the Ethereum-key step of a wallet setup.
-fn ecdsa_keygen_detail(setup: EcdsaSetup) -> (String, f32) {
-    match setup {
-        EcdsaSetup::Preparing { elapsed_secs } => (
+fn ecdsa_keygen_detail(phase: Option<DkgPhase>, setup: EcdsaSetup) -> (String, f32) {
+    match (phase, setup) {
+        (Some(DkgPhase::WaitingForPrimes), EcdsaSetup::Preparing { elapsed_secs }) => (
             format!(
                 "Waiting for this device's safe primes ({} so far, usually 1-5 min). Keep \
                  every device online.",
@@ -2333,6 +2344,7 @@ mod tests {
         // FROST done, Ethereum key waiting for this device's primes.
         state.ceremony_open = true;
         state.ecdsa_keygen = true;
+        state.ecdsa_phase = Some(DkgPhase::WaitingForPrimes);
         let mut ui = simulator(state.view());
         assert!(
             ui.find("Generating the Ethereum key (threshold ECDSA)")
@@ -2349,6 +2361,19 @@ mod tests {
         state.ecdsa_setup = EcdsaSetup::Ready;
         assert!(simulator(state.view()).find("ECDSA setup: ready").is_ok());
         let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[test]
+    fn running_ecdsa_ceremony_does_not_wait_for_next_wallet_primes() {
+        let next_wallet = EcdsaSetup::Preparing { elapsed_secs: 72 };
+        for phase in [DkgPhase::AuxInfo, DkgPhase::Keygen] {
+            let (detail, progress) = ecdsa_keygen_detail(Some(phase), next_wallet);
+            assert!(detail.starts_with("Aux info and key generation"));
+            assert_eq!(progress, 0.92);
+        }
+        let (detail, progress) = ecdsa_keygen_detail(Some(DkgPhase::WaitingForPrimes), next_wallet);
+        assert!(detail.starts_with("Waiting for this device's safe primes"));
+        assert_eq!(progress, 0.85);
     }
 
     #[tokio::test]
