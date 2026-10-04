@@ -1,0 +1,115 @@
+{
+  "source": "commit containing this manifest; exact source_inputs hashes below",
+  "base_head": "c1ff263bf6190339f03d38ea618a994655a13007",
+  "engine_git_rev": "18328a1b8f6d04c769818036b2a0b835c58d22bb",
+  "change": "One presentation line sets default window1120\u00d7680; resizable/maximizable default policy and typography unchanged. Logical area38080px smaller than1024\u00d7768 (4.84%); height88px shorter, width96px wider.",
+  "release": {
+    "path": "/tmp/starlab-desktop-versioned-releases/default-1120-18328/starlab-desktop",
+    "sha256": "c2f2733b548fb7010de952a6d9cd338860125308e7124a25911c0c38148a86e9"
+  },
+  "checks": {
+    "fmt": "passed",
+    "locked_check": "passed;7.48seconds",
+    "locked_release": "passed;127seconds",
+    "default_viewport_fixtures": "passed;27.57seconds;4public fixture states+2scrolled captures;temporary test-onlyviewportoverride restored before finalcheck/release",
+    "interaction_assertions": "Approve & sign visible/clickable; wheel-scroll bottom then Request signature/Export key share\u2026 visible/clickable",
+    "business_baseline": "c1ff26351tests+ignoredcurrent18328three-node32.99s retained;core_adapterbytes and all3pins/lock unchanged, no newcrypto claim"
+  },
+  "native": {
+    "backend": "tiny-skia",
+    "display": ":167",
+    "geometry": "xdotool actualdefault WIDTH1120 HEIGHT680, no resize before captures",
+    "scope": "isolated blank keystore,localhost refused signal, no card/livewallet/transaction",
+    "review": "actualdefault+passwordfocusedsetup all5sidebar navigation/status visible; typography unchanged, no clippedinputs or repainttrails",
+    "fixture_backend": "wgpu snapshots logical1120\u00d7680; outputdevicepixel scale differs from native screenshot, not a nativeGPU approval claim"
+  },
+  "source_inputs": [
+    {
+      "file": "Cargo.toml",
+      "sha256": "40482e98ac8363f8cdbf2d463cf333f2239cca769bd89007e56134e708081fbc"
+    },
+    {
+      "file": "Cargo.lock",
+      "sha256": "9b38c796e765f495dd20a72eaafd70e3a24ec050e5af18ea9882ec1841452d85"
+    },
+    {
+      "file": "src/core_adapter.rs",
+      "sha256": "e19779217bbc250569840051c8698f7ade8c55b9fcd9826edb08f26b67d887a5"
+    },
+    {
+      "file": "src/main.rs",
+      "sha256": "1fac9bd6dd287e8be30c6797b1705859c1b95ea7dee10125b7a036ccffd1b685"
+    },
+    {
+      "file": "src/ui/assets.rs",
+      "sha256": "00db9daecddb018d8959cbde9d4a9c50a0b8be010bc13b8a6a0fc7acb90ff66b"
+    },
+    {
+      "file": "src/ui/components.rs",
+      "sha256": "fd41bfd3055d42efc3e8e663bebbe353a64ba0bd91839f4bb6e170469f51121c"
+    },
+    {
+      "file": "src/ui/mod.rs",
+      "sha256": "660b163a8d44ad4e8224afda3a70e50c8c91c9a2a3d542938e909cb20db873e9"
+    },
+    {
+      "file": "src/ui/theme.rs",
+      "sha256": "9ed0f3374f78d861645b7695b2f48a92a5d766808e44336200563ef73423cb9a"
+    },
+    {
+      "file": "src/ui/views.rs",
+      "sha256": "7da1668de2bd3ed30b85d95bd30f612884a851e48ecaaf1215a9e2d65315cbd3"
+    },
+    {
+      "file": "src/ui_callback.rs",
+      "sha256": "1727b6e7a7a99b80c0c6ff93782edb7f21139b457c576c8719fa3b1069fcc934"
+    }
+  ],
+  "screenshots": [
+    {
+      "file": "/tmp/starlab-desktop-default-1120-native-shots/01-default-window.png",
+      "sha256": "5c431cccc9581ca67198384c989c92c7091504f6ef1aa84c52e560f7241fb60a"
+    },
+    {
+      "file": "/tmp/starlab-desktop-default-1120-native-shots/02-focused-setup.png",
+      "sha256": "248498bcf4d5ebecf397902c855d45fe3736008ea0cab828d28364746a14d7ab"
+    },
+    {
+      "file": "/tmp/starlab-desktop-default-1120-shots/default/1-offline-wgpu.png",
+      "sha256": "adc62127f4b9a78feb9254c1209c88d78fcc682ca328852a181127944a02cd15"
+    },
+    {
+      "file": "/tmp/starlab-desktop-default-1120-shots/default/10-backup-ready-scrolled-wgpu.png",
+      "sha256": "8f7629b49cba829a362467400064f89edf398c883a3ef44ddc668a72da3d8da2"
+    },
+    {
+      "file": "/tmp/starlab-desktop-default-1120-shots/default/10-backup-ready-wgpu.png",
+      "sha256": "a82b707433dbb13759ee409211f005fb846b898b34e564cb9b8e71286e22824c"
+    },
+    {
+      "file": "/tmp/starlab-desktop-default-1120-shots/default/2-create-wgpu.png",
+      "sha256": "70f2688e79005d181b293daa7255c7844f19669a8c9b50ef3b39491f48d911f4"
+    },
+    {
+      "file": "/tmp/starlab-desktop-default-1120-shots/default/5-sign-scrolled-wgpu.png",
+      "sha256": "46bcbb7590c48d23e48ccd771c93f575a3f5ce03c5e6e69c61195c7d7fd73840"
+    },
+    {
+      "file": "/tmp/starlab-desktop-default-1120-shots/default/5-sign-wgpu.png",
+      "sha256": "7d5840a3b1dbe053d23a0cb68abe7daf5ca55de54f868fdfd3bb35ccfcf52fd3"
+    }
+  ],
+  "logs": [
+    "/tmp/starlab-desktop-default-1120-fixtures.log",
+    "/tmp/starlab-desktop-default-1120-fmt.log",
+    "/tmp/starlab-desktop-default-1120-check.log",
+    "/tmp/starlab-desktop-default-1120-release.log",
+    "/tmp/starlab-desktop-default-1120-native.log"
+  ],
+  "geometry_evidence": "/tmp/starlab-desktop-default-1120-geometry.txt",
+  "remaining": [
+    "New head remote CI pending",
+    "Signed installers/platform distribution not implemented",
+    "Physical YubiKey/browser signing unverified"
+  ]
+}

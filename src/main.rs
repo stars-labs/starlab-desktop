@@ -36,6 +36,7 @@ fn main() -> iced::Result {
 
     iced::application(State::new, State::update, State::view)
         .title("Starlab Desktop")
+        .window_size((1120.0, 680.0))
         .settings(iced::Settings {
             default_text_size: 14.0.into(),
             ..iced::Settings::default()
