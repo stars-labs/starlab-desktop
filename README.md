@@ -82,8 +82,17 @@ backend selection remains unchanged.
 ## Dependency note
 
 `starlab-client`, `starlab-core`, and the test signal server share the pinned
-engine revision `3c5982d0d458fce1a04c393a679fb5a91a2a168f`. This is the pushed
-integrated ECDSA engine, including the fixes reviewed in engine PR135.
+engine revision `fab8e16634ce4c03d71b00ff9f92bcb058ecc9d4`. This is the pushed
+integrated ECDSA engine, including the fixes reviewed in engine PR135 and
+matching-session signing review cleanup when an invitation is withdrawn.
 `Cargo.lock` records the same revision, so the committed desktop builds and
 tests reproduce the reviewed engine without a local dependency override.
 Update all three revisions together when adopting a subsequent engine release.
+
+Verification for this pin (4 October 2026): `cargo test --locked` passed
+49 tests with 1 ignored; strict all-target clippy, formatting, and locked
+release build passed. The ignored three-device loopback test also passed:
+2-of-3 DKG, Ethereum account 1 signing with independent address recovery,
+and encrypted FROST share export/import. That test uses deterministic test
+prime fixtures; fresh-prime live wallet and Sepolia acceptance are separate
+recorded runs.
