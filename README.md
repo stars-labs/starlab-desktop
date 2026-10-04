@@ -37,7 +37,8 @@ configure the device and its signaling connection.
 2. Under **Set up wallet**, create a named wallet and choose a password of at
    least eight characters. Share the invite ID with the other two devices;
    each joins with its own password. Keep all three devices online through
-   setup. Ethereum preparation can take several minutes.
+   setup. Ethereum preparation can take several minutes. Use **Cancel** in the
+   active setup banner to withdraw the invite and return to setup.
 3. Select your wallet and account in the sidebar. Under **Sign message**,
    choose the chain and enter the message as hex bytes. Signing needs any two
    of the three devices. On the other device, review the wallet, account,
@@ -123,16 +124,18 @@ backend selection remains unchanged.
 ## Dependency note
 
 `starlab-client`, `starlab-core`, and the test signal server share the pinned
-engine revision `fab8e16634ce4c03d71b00ff9f92bcb058ecc9d4`. This is the pushed
+engine revision `031e81f3177a839eebdd7dfa48e8710e2d999222`. This is the pushed
 integrated ECDSA engine, including the fixes reviewed in engine PR135 and
-matching-session signing review cleanup when an invitation is withdrawn.
+matching-session signing review cleanup when an invitation is withdrawn,
+persistent wallet deletion and password-encrypted unused-prime cache leases.
 `Cargo.lock` records the same revision, so the committed desktop builds and
 tests reproduce the reviewed engine without a local dependency override.
 Update all three revisions together when adopting a subsequent engine release.
 
-Verification for this pin (4 October 2026): `cargo test --locked` passed
-49 tests with 1 ignored; strict all-target clippy, formatting, and locked
-release build passed. The ignored three-device loopback test also passed:
+Verification for this pin (5 October 2026): `cargo test --locked` passed
+50 tests with 1 ignored; strict all-target clippy, formatting, and locked
+release build passed. The previously verified ignored three-device loopback test passed on the
+preceding pin (the cryptographic core is unchanged):
 2-of-3 DKG, Ethereum account 1 signing with independent address recovery,
 and encrypted FROST share export/import. That test uses deterministic test
 prime fixtures; fresh-prime live wallet and Sepolia acceptance are separate

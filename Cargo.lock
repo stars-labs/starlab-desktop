@@ -3117,7 +3117,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.58.0",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -7976,7 +7976,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "starlab-client"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?rev=fab8e16634ce4c03d71b00ff9f92bcb058ecc9d4#fab8e16634ce4c03d71b00ff9f92bcb058ecc9d4"
+source = "git+https://github.com/stars-labs/starlab-mpc?rev=031e81f3177a839eebdd7dfa48e8710e2d999222#031e81f3177a839eebdd7dfa48e8710e2d999222"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -8022,7 +8022,7 @@ dependencies = [
 [[package]]
 name = "starlab-core"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?rev=fab8e16634ce4c03d71b00ff9f92bcb058ecc9d4#fab8e16634ce4c03d71b00ff9f92bcb058ecc9d4"
+source = "git+https://github.com/stars-labs/starlab-mpc?rev=031e81f3177a839eebdd7dfa48e8710e2d999222#031e81f3177a839eebdd7dfa48e8710e2d999222"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -8080,7 +8080,7 @@ dependencies = [
 [[package]]
 name = "starlab-signal-server"
 version = "0.1.1"
-source = "git+https://github.com/stars-labs/starlab-mpc?rev=fab8e16634ce4c03d71b00ff9f92bcb058ecc9d4#fab8e16634ce4c03d71b00ff9f92bcb058ecc9d4"
+source = "git+https://github.com/stars-labs/starlab-mpc?rev=031e81f3177a839eebdd7dfa48e8710e2d999222#031e81f3177a839eebdd7dfa48e8710e2d999222"
 dependencies = [
  "futures-util",
  "serde",
