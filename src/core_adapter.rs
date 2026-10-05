@@ -392,7 +392,10 @@ impl CoreAdapter {
                 UiEvent::Invites(model.session_invites.iter().filter_map(invite).collect()),
                 UiEvent::ActiveSession(model.active_session.as_ref().and_then(invite)),
                 UiEvent::CeremonyOpen(ceremony_open(model)),
-                UiEvent::EcdsaKeygen(keygen),
+                UiEvent::EcdsaKeygen {
+                    running: keygen,
+                    phase: model.wallet_state.ecdsa_dkg_phase,
+                },
                 UiEvent::DkgStatus {
                     active,
                     round,
@@ -401,6 +404,23 @@ impl CoreAdapter {
             ];
             for event in events {
                 let _ = ui_tx.send(event);
+            }
+            if matches!(msg, Some(Message::WebSocketDisconnected))
+                && !model.network_state.connected
+                && model.network_state.reconnect_attempts
+                    >= model.network_state.max_reconnect_attempts
+            {
+                let _ = ui_tx.send(UiEvent::ConnectionFailed);
+            }
+            if let Some(Message::DKGFailed { error }) = msg {
+                let status =
+                    "Wallet setup failed. Check that all devices are connected, then try again."
+                        .to_string();
+                let _ = ui_tx.send(UiEvent::Message {
+                    log_line: format!("[ERROR] Wallet setup failed: {error}"),
+                    status,
+                    is_error: true,
+                });
             }
         };
         let state = Arc::new(CoreState::new());
@@ -648,25 +668,47 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::watch;
 
-    /// Spawn a real runner (unreachable signal server) that reports
-    /// `ceremony_open` after every update.
-    fn spawn_runner() -> (
+    /// Keep the runner connected so cancellation tests cannot finish through
+    /// an unrelated connection failure before the explicit cancel action.
+    async fn spawn_runner(
+        signal_url: Option<String>,
+    ) -> (
         UnboundedSender<Message>,
         watch::Receiver<bool>,
         std::path::PathBuf,
+        String,
+        watch::Receiver<Option<String>>,
     ) {
         let keystore = std::env::temp_dir().join(format!("starlab-test-{}", uuid::Uuid::new_v4()));
+        let url = if let Some(url) = signal_url {
+            url
+        } else {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let url = format!(
+                "ws://{}/?room=cancel-{}",
+                listener.local_addr().unwrap(),
+                uuid::Uuid::new_v4()
+            );
+            tokio::spawn(starlab_signal_server::run(listener));
+            url
+        };
+        let (invite_tx, invite_rx) = watch::channel(None);
+        let (connected_tx, mut connected_rx) = watch::channel(false);
         let (flag_tx, flag_rx) = watch::channel(false);
         let (tx, _control) = spawn_secp256k1_runner(
-            "test-device".to_string(),
+            format!("test-device-{}", uuid::Uuid::new_v4()),
             keystore.to_string_lossy().into_owned(),
-            "ws://127.0.0.1:9".to_string(),
+            url.clone(),
             insecure_test_primes(0),
             move |model: &Model, _| {
+                let _ = invite_tx.send(model.session_invites.first().map(|s| s.session_id.clone()));
+                let _ = connected_tx.send(model.network_state.connected);
                 let _ = flag_tx.send(ceremony_open(model));
             },
         );
-        (tx, flag_rx, keystore)
+        tx.send(Message::TriggerReconnect).unwrap();
+        wait_for(&mut connected_rx, true).await;
+        (tx, flag_rx, keystore, url, invite_rx)
     }
 
     async fn wait_for(rx: &mut watch::Receiver<bool>, want: bool) {
@@ -733,11 +775,11 @@ mod tests {
             EcdsaSetup::Preparing { elapsed_secs: 9 }
                 .describe()
                 .as_deref(),
-            Some("ECDSA setup: preparing safe primes (9s so far, usually 1-5 min)")
+            Some("Secure setup: preparing (9s so far, usually 1-5 min)")
         );
         assert_eq!(
             EcdsaSetup::Ready.describe().as_deref(),
-            Some("ECDSA setup: ready")
+            Some("Secure setup: ready")
         );
         assert_eq!(EcdsaSetup::NotNeeded.describe(), None);
     }
@@ -970,6 +1012,71 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn runner_dkg_failure_closes_setup_and_allows_retry() {
+        let keystore =
+            std::env::temp_dir().join(format!("starlab-dkg-failure-{}", uuid::Uuid::new_v4()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let adapter = CoreAdapter::with_primes(
+            tx,
+            "failure-device".into(),
+            keystore.to_string_lossy().into_owned(),
+            "ws://127.0.0.1:9".into(),
+            "secp256k1".into(),
+            insecure_test_primes(0),
+        );
+        adapter
+            .create_wallet("Failed setup".into(), "pw".into())
+            .await
+            .unwrap();
+        next_match(&mut rx, "setup opened", |event| {
+            matches!(event, UiEvent::CeremonyOpen(true)).then_some(())
+        })
+        .await;
+        adapter
+            .runner_tx
+            .send(Message::DKGFailed {
+                error: "A device disconnected during wallet setup".into(),
+            })
+            .unwrap();
+        let mut closed = false;
+        let mut keygen_stopped = false;
+        let mut dkg_stopped = false;
+        next_match(&mut rx, "visible setup failure", |event| {
+            match event {
+                UiEvent::CeremonyOpen(false) => closed = true,
+                UiEvent::EcdsaKeygen { running: false, .. } => keygen_stopped = true,
+                UiEvent::DkgStatus { active: false, .. } => dkg_stopped = true,
+                UiEvent::Message {
+                    status,
+                    log_line,
+                    is_error: true,
+                } if status.contains("then try again")
+                    && !status.contains("A device disconnected")
+                    && log_line.contains("A device disconnected during wallet setup") =>
+                {
+                    return Some(());
+                }
+                _ => {}
+            }
+            None
+        })
+        .await;
+        assert!(closed, "failed setup must close before presenting retry");
+        assert!(keygen_stopped, "failed setup must stop key generation");
+        assert!(dkg_stopped, "failed setup must stop DKG progress");
+        adapter
+            .create_wallet("Retry setup".into(), "pw".into())
+            .await
+            .unwrap();
+        next_match(&mut rx, "retry opened", |event| {
+            matches!(event, UiEvent::CeremonyOpen(true)).then_some(())
+        })
+        .await;
+        adapter.cancel_ceremony().await.unwrap();
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
     fn session(session_type: SessionType, message: Option<&str>) -> SignalSession {
         SignalSession {
             session_id: "s1".to_string(),
@@ -1156,7 +1263,7 @@ mod tests {
 
     #[tokio::test]
     async fn creator_ceremony_opens_on_create_and_closes_on_cancel() {
-        let (tx, mut open, keystore) = spawn_runner();
+        let (tx, mut open, keystore, _, _) = spawn_runner(None).await;
         tx.send(Message::HeadlessCreateWallet {
             config: WalletConfig {
                 name: "w".to_string(),
@@ -1177,31 +1284,46 @@ mod tests {
 
     #[tokio::test]
     async fn joiner_ceremony_opens_on_join_and_closes_on_cancel() {
-        let (tx, mut open, keystore) = spawn_runner();
-        tx.send(Message::SessionDiscovered {
-            session: SignalSession {
-                session_id: "s1".to_string(),
-                proposer_id: "peer".to_string(),
-                total: 2,
-                threshold: 2,
-                participants: vec!["peer".to_string()],
-                session_type: SessionType::DKG,
-                curve_type: "secp256k1".to_string(),
-                coordination_type: "online".to_string(),
-                signing_message_hex: None,
-            },
-        })
-        .unwrap();
+        let (creator, mut creator_open, creator_keystore, url, _) = spawn_runner(None).await;
+        let (tx, mut open, keystore, _, mut invites) = spawn_runner(Some(url)).await;
+        creator
+            .send(Message::HeadlessCreateWallet {
+                config: WalletConfig {
+                    name: "cancel fixture".into(),
+                    total_participants: DEFAULT_TOTAL,
+                    threshold: DEFAULT_THRESHOLD,
+                    mode: WalletMode::Online,
+                },
+                password: "pw".into(),
+                label: "cancel fixture".into(),
+            })
+            .unwrap();
+        wait_for(&mut creator_open, true).await;
+        let session_id =
+            tokio::time::timeout(Duration::from_secs(5), invites.wait_for(|s| s.is_some()))
+                .await
+                .unwrap()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .clone();
         tx.send(Message::HeadlessJoinSession {
-            session_id: "s1".to_string(),
+            session_id,
             password: "pw".to_string(),
             label: String::new(),
         })
         .unwrap();
         wait_for(&mut open, true).await;
 
+        assert!(
+            *open.borrow(),
+            "joiner must still be in-flight before cancel"
+        );
+        assert!(*creator_open.borrow(), "creator must still be waiting");
         tx.send(Message::CancelDKG).unwrap();
         wait_for(&mut open, false).await;
+        creator.send(Message::CancelDKG).unwrap();
+        let _ = std::fs::remove_dir_all(creator_keystore);
         let _ = std::fs::remove_dir_all(keystore);
     }
 }

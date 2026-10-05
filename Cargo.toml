@@ -10,18 +10,21 @@ publish = false
 # Iced UI (Elm architecture, MIT-licensed). The default backend (wgpu) +
 # tiny-skia fallback covers X11, Wayland, macOS and Windows. `tokio` feature
 # wires Iced's executor to the same Tokio runtime the core managers run on.
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "svg", "image-without-codecs"] }
 
 # Business-logic backend: the FROST engine + core managers
 # (WalletManager, SessionManager, DkgManager, OfflineManager,
 # ConnectionManager, SigningManager, CoreState) + HeadlessRunner — consumed
 # from the engine repo as a git dependency. Pin to a tag/rev for releases.
-starlab-client = { git = "https://github.com/stars-labs/starlab-mpc", branch = "feat/ecdsa-cggmp24" }
+starlab-client = { git = "https://github.com/stars-labs/starlab-mpc", rev = "18328a1b8f6d04c769818036b2a0b835c58d22bb" }
 
 # The account model (BIP-44 paths + public-only per-account address
 # derivation) — single source of truth shared by every client. Used directly
 # by the view layer so switching accounts is a pure local re-derivation.
-starlab-core = { git = "https://github.com/stars-labs/starlab-mpc", branch = "feat/ecdsa-cggmp24" }
+starlab-core = { git = "https://github.com/stars-labs/starlab-mpc", rev = "18328a1b8f6d04c769818036b2a0b835c58d22bb" }
+
+# Decode the packaged Sui PNG only; avoid unrelated image codec dependencies.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 hex = "0.4.3"
 uuid = { version = "1.26.1", features = ["v4"] }
@@ -63,7 +66,7 @@ serde_json = "1.0.151"
 # Sign test messages with a known key to check the ecrecover verification.
 k256 = { version = "0.14.0", features = ["ecdsa"] }
 # In-process signal server for the end-to-end create → sign test.
-starlab-signal-server = { git = "https://github.com/stars-labs/starlab-mpc", branch = "feat/ecdsa-cggmp24" }
+starlab-signal-server = { git = "https://github.com/stars-labs/starlab-mpc", rev = "18328a1b8f6d04c769818036b2a0b835c58d22bb" }
 
 # The engine's threshold ECDSA (cggmp24) is big-integer heavy (Paillier + ZK
 # proofs): unoptimized, a debug build's wallet setup and the e2e test take

@@ -51,16 +51,16 @@ pub enum EcdsaSetup {
 }
 
 impl EcdsaSetup {
-    /// One status line, e.g. "ECDSA setup: preparing safe primes (1m 12s so
+    /// One status line, e.g. "Secure setup: preparing (1m 12s so
     /// far, usually 1-5 min)"; `None` when there's nothing to show.
     pub fn describe(&self) -> Option<String> {
         match self {
             Self::NotNeeded => None,
             Self::Preparing { elapsed_secs } => Some(format!(
-                "ECDSA setup: preparing safe primes ({} so far, usually 1-5 min)",
+                "Secure setup: preparing ({} so far, usually 1-5 min)",
                 format_elapsed(*elapsed_secs)
             )),
-            Self::Ready => Some("ECDSA setup: ready".to_string()),
+            Self::Ready => Some("Secure setup: ready".to_string()),
         }
     }
 }
@@ -91,6 +91,7 @@ pub struct Invite {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     Connected(bool),
+    ConnectionFailed,
     /// Peers with an open WebRTC data channel to this device.
     Peers(usize),
     Wallets(Vec<WalletView>),
@@ -106,7 +107,10 @@ pub enum UiEvent {
     CeremonyOpen(bool),
     /// The FROST keys of the running wallet setup are done and its Ethereum
     /// key (threshold ECDSA: safe primes → aux info → keygen) is being made.
-    EcdsaKeygen(bool),
+    EcdsaKeygen {
+        running: bool,
+        phase: Option<starlab_client::protocal::ecdsa::DkgPhase>,
+    },
     /// This device's safe-prime generator, polled once a second.
     EcdsaSetup(EcdsaSetup),
     /// The signing manager's current request: ours while we sign, or a
