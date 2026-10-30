@@ -12,19 +12,18 @@
 //! setup, a peer's signature request) is pinned above the tabs.
 
 mod core_adapter;
+mod ui;
 mod ui_callback;
 
 use std::sync::{Arc, Mutex as StdMutex};
 
 use iced::futures::stream;
-use iced::widget::{
-    Column, Row, Space, button, column, container, progress_bar, row, scrollable, text, text_input,
-};
-use iced::{Alignment, Background, Border, Color, Element, Length, Subscription, Task, Theme};
+use iced::{Subscription, Task, Theme};
 
 use core_adapter::{CoreAdapter, DEFAULT_THRESHOLD, DEFAULT_TOTAL};
 use starlab_client::core::{SigningRequest, SigningState};
-use ui_callback::{Invite, UiEvent, WalletView};
+use starlab_client::protocal::ecdsa::DkgPhase;
+use ui_callback::{EcdsaSetup, Invite, UiEvent, WalletView};
 
 // ---------------------------------------------------------------------------
 // Entry point
@@ -37,6 +36,11 @@ fn main() -> iced::Result {
 
     iced::application(State::new, State::update, State::view)
         .title("Starlab Desktop")
+        .window_size((1120.0, 680.0))
+        .settings(iced::Settings {
+            default_text_size: 14.0.into(),
+            ..iced::Settings::default()
+        })
         .theme(State::theme)
         .subscription(State::subscription)
         .run()
@@ -52,6 +56,8 @@ pub enum Tab {
     Setup,
     Sign,
     Activity,
+    Connection,
+    Backup,
 }
 
 /// Every password field sits next to the action that needs it.
@@ -107,6 +113,8 @@ enum PendingAction {
 pub enum Message {
     Ui(UiEvent),
     TabSelected(Tab),
+    ToggleActivityDetails,
+    ToggleSigningDetails,
 
     // Network
     ServerUrlChanged(String),
@@ -175,10 +183,15 @@ impl Config {
             device_id: std::env::var("MPC_DEVICE_ID")
                 .unwrap_or_else(|_| "native-node-001".to_string()),
             // Keystore lives alongside the TUI's (~/.frost_keystore).
-            keystore_path: format!(
-                "{}/.frost_keystore",
-                std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
-            ),
+            keystore_path: std::env::var("MPC_KEYSTORE_PATH")
+                .ok()
+                .filter(|path| !path.trim().is_empty())
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}/.frost_keystore",
+                        std::env::var("HOME").unwrap_or_else(|_| ".".to_string())
+                    )
+                }),
             server_url,
             room: std::env::var("MPC_ROOM")
                 .ok()
@@ -220,6 +233,11 @@ pub struct State {
     invites: Vec<Invite>,
     active_session: Option<Invite>,
     ceremony_open: bool,
+    /// FROST done, the Ethereum (threshold-ECDSA) key is being made.
+    ecdsa_keygen: bool,
+    ecdsa_phase: Option<DkgPhase>,
+    /// This device's safe-prime generator (the next wallet's ECDSA setup).
+    ecdsa_setup: EcdsaSetup,
     dkg_active: bool,
     dkg_round: u8,
     dkg_progress: f32,
@@ -232,9 +250,14 @@ pub struct State {
     sign_hex: String,
     signing_state: SigningState,
     last_signature: String,
+    /// What the pending/last own signing was for, to label and verify the
+    /// signature when it arrives.
+    last_signed: Option<SignedFor>,
 
     // UI
     active_tab: Tab,
+    show_activity_details: bool,
+    show_signing_details: bool,
     wallet_name: String,
     invite_id: String,
     pending_action: Option<PendingAction>,
@@ -285,15 +308,25 @@ impl State {
             invites: Vec::new(),
             active_session: None,
             ceremony_open: false,
+            ecdsa_keygen: false,
+            ecdsa_phase: None,
+            ecdsa_setup: if signing_curve == "ed25519" {
+                EcdsaSetup::NotNeeded
+            } else {
+                EcdsaSetup::Preparing { elapsed_secs: 0 }
+            },
             dkg_active: false,
             dkg_round: 0,
             dkg_progress: 0.0,
             signing_request: None,
-            sign_chain: starlab_core::accounts::chains_for_curve(signing_curve)[0].0,
+            sign_chain: device_chains(signing_curve)[0].0,
             sign_hex: String::new(),
             signing_state: SigningState::Idle,
             last_signature: String::new(),
+            last_signed: None,
             active_tab: Tab::Setup,
+            show_activity_details: false,
+            show_signing_details: false,
             wallet_name: String::new(),
             invite_id: String::new(),
             pending_action: None,
@@ -307,7 +340,7 @@ impl State {
     }
 
     fn theme(&self) -> Theme {
-        Theme::Dark
+        ui::theme::desktop_theme()
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -326,6 +359,14 @@ impl State {
         match message {
             Message::Ui(event) => {
                 self.apply_ui_event(event);
+                Task::none()
+            }
+            Message::ToggleSigningDetails => {
+                self.show_signing_details = !self.show_signing_details;
+                Task::none()
+            }
+            Message::ToggleActivityDetails => {
+                self.show_activity_details = !self.show_activity_details;
                 Task::none()
             }
             Message::TabSelected(tab) => {
@@ -398,7 +439,7 @@ impl State {
                 action(async move { adapter.import_share(password).await })
             }
             Message::ExportShare => {
-                let Some((wallet_id, curve)) = self.export_target() else {
+                let Some((wallet_id, curves)) = self.export_target() else {
                     return Task::none();
                 };
                 if self.export_blocker().is_some() {
@@ -407,8 +448,8 @@ impl State {
                 let adapter = self.adapter.clone();
                 let password = self.passwords.backup.clone();
                 self.pending_action = Some(PendingAction::ExportShare);
-                self.set_status("Exporting the key share");
-                action(async move { adapter.export_share(wallet_id, curve, password).await })
+                self.set_status("Exporting the key shares");
+                action(async move { adapter.export_shares(wallet_id, curves, password).await })
             }
 
             Message::WalletNameChanged(v) => {
@@ -477,6 +518,13 @@ impl State {
                     self.sign_hex.trim().to_string(),
                     self.passwords.unlock.clone(),
                 );
+                self.last_signed = self.signing_address().map(|(address, _)| SignedFor {
+                    chain: self.sign_chain,
+                    message_hex: hex.clone(),
+                    prehashed: false,
+                    address,
+                    cosigned: false,
+                });
                 self.pending_action = Some(PendingAction::Sign);
                 self.last_signature.clear();
                 self.set_status(
@@ -492,6 +540,12 @@ impl State {
                 if self.approve_blocker().is_some() {
                     return Task::none();
                 }
+                self.last_signed = self
+                    .signing_request
+                    .as_ref()
+                    .filter(|r| r.id == request_id)
+                    .and_then(|r| self.cosign_target(r));
+                self.last_signature.clear();
                 let adapter = self.adapter.clone();
                 let password = self.passwords.unlock.clone();
                 self.pending_action = Some(PendingAction::CoSign);
@@ -535,6 +589,14 @@ impl State {
                 }
                 self.connected = connected;
             }
+            UiEvent::ConnectionFailed => {
+                self.connected = false;
+                self.connected_url = None;
+                self.set_status(
+                    "Could not connect. Check the signal server and room, then try Connect again.",
+                );
+                self.status_is_error = true;
+            }
             UiEvent::Peers(peers) => self.peers = peers,
             UiEvent::Wallets(wallets) => {
                 // A new wallet (startup load or a finished setup) → go sign.
@@ -558,16 +620,23 @@ impl State {
                 self.dkg_progress = progress;
             }
             UiEvent::CeremonyOpen(open) => self.ceremony_open = open,
+            UiEvent::EcdsaKeygen { running, phase } => {
+                self.ecdsa_keygen = running;
+                self.ecdsa_phase = phase;
+            }
+            UiEvent::EcdsaSetup(setup) => self.ecdsa_setup = setup,
             UiEvent::SigningRequest(request) => self.signing_request = request,
             UiEvent::SigningState(state) => self.signing_state = state,
             UiEvent::SigningComplete(signature) => {
-                // A co-signer's copy of the signature belongs to the requester.
-                if self.pending_action == Some(PendingAction::CoSign) {
-                    self.set_status("Co-signed — the requesting device has the signature");
+                // Shown (and verified) either way; a co-signer's copy is
+                // labelled as the requesting device's signature.
+                let cosigned = self.last_signed.as_ref().is_some_and(|s| s.cosigned);
+                self.last_signature = signature;
+                self.set_status(if cosigned {
+                    "Co-signed — the requesting device has the signature too"
                 } else {
-                    self.last_signature = signature;
-                    self.set_status("Signature ready");
-                }
+                    "Signature ready"
+                });
             }
             UiEvent::Message {
                 log_line,
@@ -679,28 +748,28 @@ impl State {
         }
     }
 
-    /// `(wallet id, curve)` of the share "Export key share…" writes: the
-    /// selected wallet's key on this device's curve, else its first key.
-    fn export_target(&self) -> Option<(String, String)> {
+    /// `(wallet id, curves)` "Export key share…" writes: every key of the
+    /// selected wallet (a secp256k1 wallet has a Taproot and an ECDSA key —
+    /// losing the ECDSA file would lose the Ethereum account).
+    fn export_target(&self) -> Option<(String, Vec<String>)> {
         let wallet = self.active_wallet()?;
-        let (curve, _) = wallet
-            .keys
-            .iter()
-            .find(|(curve, _)| curve == self.signing_curve)
-            .or_else(|| wallet.keys.first())?;
-        Some((wallet.id.clone(), curve.clone()))
+        let curves: Vec<String> = wallet.keys.iter().map(|(c, _)| c.clone()).collect();
+        (!curves.is_empty()).then(|| (wallet.id.clone(), curves))
     }
 
     /// Why "Request signature" is disabled, if it is.
     fn sign_blocker(&self) -> Option<&'static str> {
         if self.signing_wallet_id().is_none() {
-            Some("This wallet has no key for this device's curve.")
+            Some("This wallet has no key for this chain on this device.")
         } else if !self.connected {
             Some("Connect to the network first.")
         } else if self.passwords.unlock.is_empty() {
             Some("Enter the wallet password.")
         } else if self.sign_hex.trim().is_empty() {
             Some("Enter the message to sign.")
+        } else if hex::decode(self.sign_hex.trim().trim_start_matches("0x")).is_err() {
+            // The engine would reject it only after the ceremony times out.
+            Some("The message must be hex bytes.")
         } else {
             None
         }
@@ -723,37 +792,47 @@ impl State {
         self.wallets.get(self.active_wallet_index)
     }
 
-    /// The account wallet signing uses: `<root>-<chain>-<account>`.
+    /// The account wallet signing uses: `<root>-<chain>-<account>`. The
+    /// engine signs an Ethereum account with the wallet's threshold-ECDSA
+    /// key and a Bitcoin account with its FROST Taproot key.
     fn signing_wallet_id(&self) -> Option<String> {
         let wallet = self.active_wallet()?;
-        wallet
-            .keys
-            .iter()
-            .any(|(curve, _)| curve == self.signing_curve)
-            .then(|| {
-                format!(
-                    "{}-{}-{}",
-                    wallet.id, self.sign_chain, self.selected_account
-                )
-            })
+        wallet_has_chain(wallet, self.sign_chain).then(|| {
+            format!(
+                "{}-{}-{}",
+                wallet.id, self.sign_chain, self.selected_account
+            )
+        })
+    }
+
+    /// What a peer's request asks this device to co-sign: its account's
+    /// address, and the digest the ceremony signs (an Ethereum request
+    /// carries the EIP-191 hash, not the text).
+    fn cosign_target(&self, request: &SigningRequest) -> Option<SignedFor> {
+        let (root, chain, account) =
+            starlab_core::accounts::parse_child_wallet_id(&request.wallet_id)?;
+        let wallet = self.wallets.iter().find(|w| w.id == root)?;
+        let chain = device_chains(self.signing_curve)
+            .into_iter()
+            .find(|(key, _)| *key == chain)?
+            .0;
+        let (address, _) = account_address(wallet, chain, account)?;
+        Some(SignedFor {
+            chain,
+            message_hex: request.message_hex.clone(),
+            prehashed: true,
+            address,
+            cosigned: true,
+        })
     }
 
     /// `(address, derivation path)` of the signing account on the chosen chain.
     fn signing_address(&self) -> Option<(String, String)> {
-        let wallet = self.active_wallet()?;
-        let (_, group_key) = wallet.keys.iter().find(|(c, _)| c == self.signing_curve)?;
-        let group_key = hex::decode(group_key).ok()?;
-        let addresses = starlab_core::accounts::account_addresses(
-            self.signing_curve,
-            &group_key,
+        account_address(
+            self.active_wallet()?,
+            self.sign_chain,
             self.selected_account,
         )
-        .ok()?;
-        let index = starlab_core::accounts::chains_for_curve(self.signing_curve)
-            .iter()
-            .position(|(key, _)| *key == self.sign_chain)?;
-        let (_, path, address) = addresses.into_iter().nth(index)?;
-        Some((address, path))
     }
 
     /// "Treasury · Ethereum · Account 0" for an account wallet id.
@@ -767,627 +846,162 @@ impl State {
             .iter()
             .find(|w| w.id == root)
             .map_or(root, |w| w.name.as_str());
-        let chain = starlab_core::accounts::chains_for_curve(self.signing_curve)
-            .iter()
-            .find(|(key, _)| *key == chain)
-            .map_or(chain, |(_, label)| *label);
-        format!("{name} · {chain} · Account {account}")
+        format!("{name} · {} · Account {account}", chain_label(chain))
     }
 
     // -- View -----------------------------------------------------------
+}
 
-    fn view(&self) -> Element<'_, Message> {
-        container(
-            column![
-                self.header(),
-                row![
-                    container(self.sidebar()).width(Length::Fixed(340.0)),
-                    container(self.main_panel()).width(Length::Fill),
-                ]
-                .spacing(18)
-                .height(Length::Fill),
-                self.status_bar(),
-            ]
-            .spacing(14),
-        )
-        .padding(20)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .into()
+/// What our own signing request was for: the chain, the message as typed
+/// (hex) and the account address the signature must check out against.
+#[derive(Debug, Clone, PartialEq)]
+struct SignedFor {
+    chain: &'static str,
+    /// The message as typed (hex) — or, for a peer's request this device
+    /// co-signed, the 32-byte digest the ceremony signed (`prehashed`).
+    message_hex: String,
+    prehashed: bool,
+    address: String,
+    /// A peer's request this device co-signed (not our own signing).
+    cosigned: bool,
+}
+
+/// The chains this device signs: a secp256k1 device signs Ethereum with the
+/// wallet's threshold-ECDSA key and Bitcoin with its FROST Taproot key; an
+/// ed25519 device signs Solana and Sui.
+fn device_chains(signing_curve: &str) -> Vec<(&'static str, &'static str)> {
+    use starlab_core::accounts::chains_for_curve;
+    if signing_curve == "ed25519" {
+        chains_for_curve("ed25519").to_vec()
+    } else {
+        chains_for_curve(starlab_core::ecdsa::ECDSA_CURVE)
+            .iter()
+            .chain(chains_for_curve("secp256k1"))
+            .copied()
+            .collect()
     }
+}
 
-    fn header(&self) -> Element<'_, Message> {
-        let (dot, label, color) = if self.connected {
-            let label = match self.peers {
-                0 => "Connected".to_string(),
-                1 => "Connected · 1 peer".to_string(),
-                n => format!("Connected · {n} peers"),
-            };
-            ("●", label, accent())
-        } else if self.connected_url.is_some() {
-            ("◌", "Connecting…".to_string(), warning())
-        } else {
-            ("○", "Offline".to_string(), muted())
-        };
-        row![
-            column![
-                text("Starlab Desktop").size(22),
-                text("MPC Wallet").size(12).color(muted()),
-            ]
-            .spacing(2),
-            Space::new().width(Length::Fill),
-            column![
-                row![text(dot).color(color), text(label).size(13).color(color)]
-                    .spacing(6)
-                    .align_y(Alignment::Center),
-                text(format!("Device {}", self.device_id))
-                    .size(12)
-                    .color(muted()),
-            ]
-            .spacing(2)
-            .align_x(Alignment::End),
-        ]
-        .align_y(Alignment::Center)
-        .into()
-    }
+/// Display name of a chain key ("ethereum" → "Ethereum").
+fn chain_label(chain: &str) -> &str {
+    ["ed25519", "secp256k1", starlab_core::ecdsa::ECDSA_CURVE]
+        .iter()
+        .flat_map(|c| starlab_core::accounts::chains_for_curve(c))
+        .find(|(key, _)| *key == chain)
+        .map_or(chain, |(_, label)| *label)
+}
 
-    fn status_bar(&self) -> Element<'_, Message> {
-        text(&self.status)
-            .size(12)
-            .color(if self.status_is_error {
-                danger()
+/// The wallet holds the key that signs `chain` (Ethereum → its ECDSA key).
+fn wallet_has_chain(wallet: &WalletView, chain: &str) -> bool {
+    starlab_core::accounts::curve_for_chain(chain)
+        .is_some_and(|curve| wallet.keys.iter().any(|(c, _)| c == curve))
+}
+
+/// `(address, path)` of `account` on `chain`, derived public-only from the
+/// wallet key that signs that chain.
+fn account_address(wallet: &WalletView, chain: &str, account: u32) -> Option<(String, String)> {
+    let curve = starlab_core::accounts::curve_for_chain(chain)?;
+    let (_, group_key) = wallet.keys.iter().find(|(c, _)| c == curve)?;
+    let group_key = hex::decode(group_key).ok()?;
+    starlab_core::accounts::account_addresses(curve, &group_key, account)
+        .ok()?
+        .into_iter()
+        .find(|(name, _, _)| name.eq_ignore_ascii_case(chain))
+        .map(|(_, path, address)| (address, path))
+}
+
+/// How the signature panel describes a finished signature.
+#[derive(Debug, Clone, PartialEq)]
+struct SignatureSummary {
+    label: &'static str,
+    /// Extra lines, e.g. the r / s / v of an ECDSA signature.
+    parts: Vec<String>,
+    verified: bool,
+    verification: String,
+}
+
+/// Name, split and verify our signature (`0x…` hex) for what was signed:
+/// Ethereum → 65-byte `r ‖ s ‖ v`, checked with `ecrecover` over the EIP-191
+/// hash against the account address (what an EVM node checks); Bitcoin →
+/// BIP-340 against the P2TR address. Other chains were checked under the
+/// group key by the engine.
+fn signature_summary(signed: Option<&SignedFor>, signature_hex: &str) -> SignatureSummary {
+    let sig = hex::decode(signature_hex.trim_start_matches("0x")).unwrap_or_default();
+    let message = signed
+        .and_then(|s| hex::decode(s.message_hex.trim_start_matches("0x")).ok())
+        .unwrap_or_default();
+    match signed {
+        Some(s) if s.chain == "ethereum" => {
+            let mut parts = Vec::new();
+            if let [rs @ .., v] = sig.as_slice()
+                && rs.len() == 64
+            {
+                parts.push(format!("r = 0x{}", hex::encode(&rs[..32])));
+                parts.push(format!("s = 0x{}", hex::encode(&rs[32..])));
+                parts.push(format!("v = {v}"));
+            }
+            let prehash = if s.prehashed {
+                message.clone()
             } else {
-                muted()
-            })
-            .into()
-    }
-
-    // ---- Sidebar ----
-
-    fn sidebar(&self) -> Element<'_, Message> {
-        scrollable(column![self.network_card(), self.wallets_card()].spacing(12)).into()
-    }
-
-    fn network_card(&self) -> Element<'_, Message> {
-        let mut body = column![
-            field(
-                "Signal server",
-                text_input("wss://panda.qzz.io", &self.server_url)
-                    .on_input(Message::ServerUrlChanged),
-            ),
-            field(
-                "Room ID",
-                text_input("Room ID", &self.room).on_input(Message::RoomChanged),
-            ),
-            row![
-                action_button("New room").on_press(Message::NewRoom),
-                action_button("Copy").on_press(Message::CopyRoom),
-            ]
-            .spacing(8),
-            hint("Devices find each other through the same server and room ID."),
-        ]
-        .spacing(10);
-
-        if self.network_changed() {
-            let label = if self.connected {
-                "Reconnect"
-            } else {
-                "Connect"
+                starlab_client::utils::eth_helper::eip191_hash(&message).to_vec()
             };
-            body = body.push(
-                action_button(label)
-                    .style(button::primary)
-                    .width(Length::Fill)
-                    .on_press_maybe(self.can_connect().then_some(Message::Connect)),
-            );
-            if self.connected {
-                body = body.push(hint(if self.can_connect() {
-                    "Reconnect to use the new server or room."
-                } else {
-                    "Finish or cancel the wallet setup before switching rooms."
-                }));
-            }
-        }
-
-        card("Network", body.into())
-    }
-
-    fn wallets_card(&self) -> Element<'_, Message> {
-        let mut body = Column::new().spacing(10);
-        if self.wallets.is_empty() {
-            body = body.push(hint(
-                "No wallets on this device yet. Create or join one under Set up wallet.",
-            ));
-        } else {
-            for (i, w) in self.wallets.iter().enumerate() {
-                let mut entry = Column::new().spacing(3).push(
-                    button(text(format!("{} · {}", w.name, w.threshold)).size(13))
-                        .width(Length::Fill)
-                        .style(if i == self.active_wallet_index {
-                            button::primary
-                        } else {
-                            button::secondary
-                        })
-                        .on_press(Message::WalletSelected(i)),
-                );
-                // One line per chain address of the selected account, derived
-                // from the group key via the engine's account model.
-                for (curve, group_key) in &w.keys {
-                    let Ok(group_key) = hex::decode(group_key) else {
-                        continue;
-                    };
-                    let Ok(addresses) = starlab_core::accounts::account_addresses(
-                        curve,
-                        &group_key,
-                        self.selected_account,
-                    ) else {
-                        continue;
-                    };
-                    for (chain, _path, address) in addresses {
-                        entry = entry.push(
-                            text(format!("{chain}  {}", short_addr(&address)))
-                                .size(12)
-                                .color(muted()),
-                        );
-                    }
-                }
-                body = body.push(entry);
-            }
-            // BIP-44 account picker: [Account 0] [Account 1] … [+]. Switching
-            // is a pure State change — addresses below re-derive in this view.
-            let mut accounts = Row::new().spacing(6);
-            for i in 0..=self.max_account {
-                accounts = accounts.push(segment_button(
-                    format!("Account {i}"),
-                    Message::SelectAccount(i),
-                    i == self.selected_account,
-                ));
-            }
-            accounts = accounts.push(button(text("+").size(13)).on_press(Message::AddAccount));
-            body = body.push(field(
-                "Account",
-                scrollable(accounts).direction(scrollable::Direction::Horizontal(
-                    scrollable::Scrollbar::default(),
-                )),
-            ));
-        }
-
-        let backup = if self.wallets.is_empty() {
-            self.import_blocker()
-        } else {
-            self.export_blocker().or(self.import_blocker())
-        };
-        body = body
-            .push(section_divider())
-            .push(text("Back up or restore").size(13))
-            .push(field(
-                "Key share password",
-                password_input("Password", &self.passwords.backup, PasswordField::Backup),
-            ))
-            .push(
-                row![
-                    action_button("Import key share…").on_press_maybe(
-                        self.import_blocker()
-                            .is_none()
-                            .then_some(Message::ImportShare)
+            let (verified, verification) =
+                match starlab_core::accounts::recover_ethereum_address(&prehash, &sig) {
+                    Ok(addr) if addr.eq_ignore_ascii_case(&s.address) => (
+                        true,
+                        format!("Verified: ecrecover gives {addr} (this account)"),
                     ),
-                    action_button("Export key share…").on_press_maybe(
-                        self.export_blocker()
-                            .is_none()
-                            .then_some(Message::ExportShare)
+                    Ok(addr) => (
+                        false,
+                        format!(
+                            "NOT verified: ecrecover gives {addr}, expected {}",
+                            s.address
+                        ),
                     ),
-                ]
-                .spacing(8),
-            );
-        body = body.push(match backup {
-            Some(reason) => text(reason).size(12).color(warning()).into(),
-            None => hint(
-                "Export saves this device's encrypted key share of the selected wallet; \
-                 import restores one.",
-            ),
-        });
-
-        card("Wallets", body.into())
-    }
-
-    // ---- Main area ----
-
-    fn main_panel(&self) -> Element<'_, Message> {
-        let mut content = Column::new().spacing(14);
-        if let Some(banner) = self.setup_banner() {
-            content = content.push(banner);
-        }
-        if let Some(requests) = self.signature_requests() {
-            content = content.push(requests);
-        }
-        content = content.push(
-            row![
-                tab_button("Set up wallet", Tab::Setup, self.active_tab),
-                tab_button("Sign", Tab::Sign, self.active_tab),
-                tab_button("Activity", Tab::Activity, self.active_tab),
-            ]
-            .spacing(6),
-        );
-        content = content.push(match self.active_tab {
-            Tab::Setup => self.setup_tab(),
-            Tab::Sign => self.sign_tab(),
-            Tab::Activity => self.activity_tab(),
-        });
-        scrollable(content).into()
-    }
-
-    /// Pinned while a wallet setup is running: who joined, the invite to
-    /// share, DKG progress, and the way out.
-    fn setup_banner(&self) -> Option<Element<'_, Message>> {
-        if !(self.ceremony_open || self.dkg_active) {
-            return None;
-        }
-        let own = self.own_invite();
-        let joined = self.active_session.as_ref().map(|s| {
-            format!(
-                "{} of {} devices have joined.",
-                s.participants.len(),
-                s.total
-            )
-        });
-        let (title, detail) = if self.dkg_active {
-            (
-                "Generating keys",
-                format!(
-                    "Round {} of 2 — keep every device online until it finishes.",
-                    self.dkg_round.max(1)
-                ),
-            )
-        } else if own.is_some() {
-            (
-                "Waiting for devices to join",
-                format!(
-                    "{} Share the invite ID with the other devices.",
-                    joined.unwrap_or_default()
-                ),
-            )
-        } else {
-            (
-                "Joined — waiting for the other devices",
-                joined.unwrap_or_default(),
-            )
-        };
-
-        let mut body = column![
-            row![
-                text(title).size(15),
-                Space::new().width(Length::Fill),
-                action_button("Cancel")
-                    .style(button::danger)
-                    .on_press(Message::CancelSetup),
-            ]
-            .align_y(Alignment::Center),
-            text(detail).size(13).color(muted()),
-        ]
-        .spacing(8);
-        if let Some(invite) = own.filter(|_| !self.dkg_active) {
-            body = body.push(
-                row![
-                    text("Invite ID").size(12).color(muted()),
-                    text(&invite.id).size(13),
-                    Space::new().width(Length::Fill),
-                    action_button("Copy invite").on_press(Message::CopyInvite),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            );
-        }
-        if self.dkg_active {
-            body = body.push(progress_bar(0.0..=1.0, self.dkg_progress));
-        }
-        Some(
-            container(body)
-                .padding(14)
-                .width(Length::Fill)
-                .style(highlight_style)
-                .into(),
-        )
-    }
-
-    /// Pinned while a peer asks this device to co-sign.
-    fn signature_requests(&self) -> Option<Element<'_, Message>> {
-        let request = self
-            .signing_request
-            .as_ref()
-            .filter(|r| r.session_id.is_some())?;
-        let blocker = self.approve_blocker();
-        let actions: Element<'_, Message> = match &self.signing_state {
-            SigningState::Commitment | SigningState::Share | SigningState::Aggregating => {
-                text("Co-signing…").size(13).color(accent()).into()
+                    Err(e) => (false, format!("NOT verified: {e}")),
+                };
+            SignatureSummary {
+                label: "ECDSA signature (r ‖ s ‖ v, 65 bytes) — ecrecover-compatible (EIP-191 personal_sign)",
+                parts,
+                verified,
+                verification,
             }
-            SigningState::Failed(error) => row![
-                text(format!("Signing failed: {error}"))
-                    .size(12)
-                    .color(danger()),
-                Space::new().width(Length::Fill),
-                action_button("Dismiss").on_press(Message::DismissSigning),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .into(),
-            _ => row![
-                text(blocker.unwrap_or_default()).size(12).color(warning()),
-                Space::new().width(Length::Fill),
-                action_button("Reject")
-                    .style(button::secondary)
-                    .on_press(Message::RejectSignatureRequest(request.id.clone())),
-                action_button("Approve & sign")
-                    .style(button::primary)
-                    .on_press_maybe(
-                        blocker
-                            .is_none()
-                            .then(|| Message::ApproveSignatureRequest(request.id.clone())),
-                    ),
-            ]
-            .spacing(8)
-            .align_y(Alignment::Center)
-            .into(),
-        };
-        let mut body = column![
-            text("Signature request").size(15),
-            text("Another device of this wallet asks this device to co-sign.").size(13),
-            text(self.describe_account_wallet(&request.wallet_id))
-                .size(12)
-                .color(muted()),
-        ]
-        .spacing(4);
-        if let Some(label) = &request.display_label {
-            body = body.push(text(label).size(12).color(faint()));
         }
-        body = body.push(
-            text(format!("Message  {}", short_addr(&request.message_hex)))
-                .size(12)
-                .color(faint()),
-        );
-        let awaiting = !matches!(
-            self.signing_state,
-            SigningState::Commitment
-                | SigningState::Share
-                | SigningState::Aggregating
-                | SigningState::Failed(_)
-        );
-        if awaiting {
-            body = body.push(
-                container(field(
-                    "Wallet password",
-                    password_input(
-                        "Unlocks this device's key share",
-                        &self.passwords.unlock,
-                        PasswordField::Unlock,
-                    ),
-                ))
-                .width(Length::Fixed(360.0)),
-            );
-        }
-        body = body.push(actions);
-        Some(
-            container(body)
-                .padding(14)
-                .width(Length::Fill)
-                .style(highlight_style)
-                .into(),
-        )
-    }
-
-    /// Create and Join side by side: each section has exactly one action.
-    fn setup_tab(&self) -> Element<'_, Message> {
-        let create_blocker = self.create_blocker();
-        let create = card(
-            "Create a new wallet",
-            column![
-                text(format!(
-                    "Start a {DEFAULT_THRESHOLD}-of-{DEFAULT_TOTAL} wallet on this device, then share \
-                     its invite ID with {} other devices. Any {DEFAULT_THRESHOLD} of the \
-                     {DEFAULT_TOTAL} can sign.",
-                    DEFAULT_TOTAL - 1
-                ))
-                .size(13)
-                .color(muted()),
-                field(
-                    "Wallet name",
-                    text_input("e.g. Treasury", &self.wallet_name)
-                        .on_input(Message::WalletNameChanged),
+        Some(s) if s.chain == "bitcoin" => {
+            let (verified, verification) = match starlab_core::accounts::verify_taproot_signature(
+                &s.address, &message, &sig,
+            ) {
+                Ok(true) => (true, format!("Verified: BIP-340 valid for {}", s.address)),
+                Ok(false) => (
+                    false,
+                    format!("NOT verified: BIP-340 check failed for {}", s.address),
                 ),
-                new_password_fields(
-                    &self.passwords.create,
-                    &self.passwords.create_confirm,
-                    PasswordField::Create,
-                    PasswordField::CreateConfirm,
-                ),
-                action_row(
-                    action_button("Create wallet")
-                        .style(button::primary)
-                        .on_press_maybe(create_blocker.is_none().then_some(Message::CreateWallet)),
-                    create_blocker,
-                ),
-            ]
-            .spacing(12)
-            .into(),
-        );
-
-        let mut invites = Column::new().spacing(6);
-        let wallet_invites = wallet_invites(&self.device_id, &self.invites);
-        if wallet_invites.is_empty() {
-            invites = invites.push(hint("No invites in this room yet."));
-        }
-        for invite in wallet_invites {
-            invites = invites.push(
-                button(
-                    column![
-                        text(&invite.id).size(13),
-                        text(format!(
-                            "from {} · {} of {} joined",
-                            invite.proposer,
-                            invite.participants.len(),
-                            invite.total
-                        ))
-                        .size(11),
-                    ]
-                    .spacing(2),
-                )
-                .width(Length::Fill)
-                .style(if invite.id == self.invite_id.trim() {
-                    button::primary
-                } else {
-                    button::secondary
-                })
-                .on_press(Message::InviteIdChanged(invite.id.clone())),
-            );
-        }
-        let join_blocker = self.join_blocker();
-        let join = card(
-            "Join a wallet",
-            column![
-                text("Another device started it: pick its invite, or paste the invite ID.")
-                    .size(13)
-                    .color(muted()),
-                field("Invites in this room", invites),
-                field(
-                    "Invite ID",
-                    text_input("Paste invite ID", &self.invite_id)
-                        .on_input(Message::InviteIdChanged),
-                ),
-                new_password_fields(
-                    &self.passwords.join,
-                    &self.passwords.join_confirm,
-                    PasswordField::Join,
-                    PasswordField::JoinConfirm,
-                ),
-                action_row(
-                    action_button("Join wallet")
-                        .style(button::primary)
-                        .on_press_maybe(join_blocker.is_none().then_some(Message::JoinWallet)),
-                    join_blocker,
-                ),
-            ]
-            .spacing(12)
-            .into(),
-        );
-
-        row![create, join].spacing(14).into()
-    }
-
-    fn sign_tab(&self) -> Element<'_, Message> {
-        let Some(wallet) = self.active_wallet() else {
-            return card(
-                "Sign a message",
-                column![
-                    hint("You need a shared wallet before you can sign."),
-                    action_button("Set up a wallet").on_press(Message::TabSelected(Tab::Setup)),
-                ]
-                .spacing(12)
-                .into(),
-            );
-        };
-
-        let mut chains = Row::new().spacing(8);
-        for (key, label) in starlab_core::accounts::chains_for_curve(self.signing_curve) {
-            chains = chains.push(segment_button(
-                *label,
-                Message::SignChainSelected(key),
-                *key == self.sign_chain,
-            ));
-        }
-        let address: Element<'_, Message> = match self.signing_address() {
-            Some((address, path)) => {
-                row![text(address).size(13), text(path).size(11).color(muted()),]
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .into()
+                Err(e) => (false, format!("NOT verified: {e}")),
+            };
+            SignatureSummary {
+                label: "BIP-340 Schnorr signature (64 bytes) — Taproot key-path spend",
+                parts: Vec::new(),
+                verified,
+                verification,
             }
-            None => hint("This wallet has no key for this device's curve."),
-        };
-        let message_hint = match self.sign_chain {
-            "ethereum" => "Hex bytes; signed as an EIP-191 personal message.",
-            "bitcoin" => "The 32-byte BIP-341 sighash, in hex.",
-            _ => "Hex bytes to sign.",
-        };
-
-        let signing = self.pending_action == Some(PendingAction::Sign);
-        let blocker = if signing { None } else { self.sign_blocker() };
-        let mut body = column![
-            column![
-                text(format!(
-                    "{} · Account {}",
-                    wallet.name, self.selected_account
-                ))
-                .size(15),
-                hint("Choose the wallet and account in the left panel."),
-            ]
-            .spacing(4),
-            field("Chain", chains),
-            field("Signing address", address),
-            field(
-                "Message",
-                text_input("0x…", &self.sign_hex).on_input(Message::SignHexChanged),
-            ),
-            hint(message_hint),
-            field(
-                "Wallet password",
-                password_input(
-                    "Unlocks this device's key share",
-                    &self.passwords.unlock,
-                    PasswordField::Unlock,
-                ),
-            ),
-            action_row(
-                action_button(if signing {
-                    "Signing…"
-                } else {
-                    "Request signature"
-                })
-                .style(button::primary)
-                .on_press_maybe((blocker.is_none() && !signing).then_some(Message::Sign),),
-                blocker,
-            ),
-        ]
-        .spacing(12);
-
-        if signing {
-            body = body.push(
-                text(signing_phase(&self.signing_state))
-                    .size(13)
-                    .color(accent()),
-            );
-        } else if let SigningState::Failed(error) = &self.signing_state {
-            body = body.push(
-                text(format!("Signing failed: {error}"))
-                    .size(13)
-                    .color(danger()),
-            );
         }
-        if !self.last_signature.is_empty() {
-            body = body.push(field(
-                "Signature",
-                row![
-                    text(&self.last_signature).size(12).width(Length::Fill),
-                    action_button("Copy").on_press(Message::CopySignature),
-                ]
-                .spacing(10)
-                .align_y(Alignment::Center),
-            ));
-        }
-
-        card("Sign a message", body.into())
+        _ => SignatureSummary {
+            label: "Signature",
+            parts: Vec::new(),
+            verified: true,
+            verification: "Checked under the wallet's group key by the engine".to_string(),
+        },
     }
+}
 
-    fn activity_tab(&self) -> Element<'_, Message> {
-        let mut lines = Column::new().spacing(2);
-        if self.log_messages.is_empty() {
-            lines = lines.push(hint("Nothing yet."));
-        }
-        for line in &self.log_messages {
-            lines = lines.push(text(line).size(12).color(faint()));
-        }
-        card(
-            "Activity",
-            scrollable(lines).height(Length::Fixed(420.0)).into(),
-        )
+/// The active Ethereum-key step; the next wallet's primes are independent.
+fn ecdsa_keygen_detail(phase: Option<DkgPhase>, setup: EcdsaSetup) -> String {
+    match (phase, setup) {
+        (Some(DkgPhase::WaitingForPrimes), EcdsaSetup::Preparing { elapsed_secs }) => format!(
+            "Preparing secure wallet setup ({} so far, usually 1-5 min). Keep every device online.",
+            crate::ui_callback::format_elapsed(elapsed_secs)
+        ),
+        _ => "Creating your shared Ethereum key with the other devices (about a minute). Keep every device online.".to_string(),
     }
 }
 
@@ -1422,43 +1036,6 @@ fn new_password_problem(password: &str, confirm: &str) -> Option<&'static str> {
 }
 
 /// Password + confirmation for a new key share, side by side.
-fn new_password_fields<'a>(
-    password: &str,
-    confirm: &str,
-    field_id: PasswordField,
-    confirm_id: PasswordField,
-) -> Element<'a, Message> {
-    column![
-        row![
-            container(field(
-                "Password",
-                password_input("At least 8 characters", password, field_id)
-            ))
-            .width(Length::Fill),
-            container(field(
-                "Confirm password",
-                password_input("Repeat it", confirm, confirm_id)
-            ))
-            .width(Length::Fill),
-        ]
-        .spacing(10),
-        hint("Encrypts this device's key share. You'll need it to sign."),
-    ]
-    .spacing(4)
-    .into()
-}
-
-fn password_input(
-    placeholder: &str,
-    value: &str,
-    field: PasswordField,
-) -> Element<'static, Message> {
-    text_input(placeholder, value)
-        .secure(true)
-        .on_input(move |v| Message::PasswordChanged(field, v))
-        .into()
-}
-
 /// Tab moves focus forward, Shift+Tab back.
 fn tab_focus(event: iced::keyboard::Event) -> Option<Message> {
     use iced::keyboard::{Event, Key, key::Named};
@@ -1585,132 +1162,6 @@ where
 // Small view helpers
 // ---------------------------------------------------------------------------
 
-fn card<'a>(title: &'a str, body: Element<'a, Message>) -> Element<'a, Message> {
-    container(column![text(title).size(15), body].spacing(12))
-        .padding(14)
-        .width(Length::Fill)
-        .style(panel_style)
-        .into()
-}
-
-/// A labelled form field.
-fn field<'a>(label: &'a str, input: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
-    column![text(label).size(12).color(muted()), input.into()]
-        .spacing(4)
-        .into()
-}
-
-fn hint(message: &str) -> Element<'_, Message> {
-    text(message).size(12).color(muted()).into()
-}
-
-/// A right-aligned primary action with the reason it's disabled on the left.
-fn action_row<'a>(
-    action: iced::widget::Button<'a, Message>,
-    blocker: Option<&'a str>,
-) -> Element<'a, Message> {
-    // The reason takes the remaining width and wraps; the button keeps its
-    // size, so a long reason in a narrow card can't squeeze it away.
-    row![
-        text(blocker.unwrap_or_default())
-            .size(12)
-            .color(warning())
-            .width(Length::Fill),
-        action,
-    ]
-    .spacing(12)
-    .align_y(Alignment::Center)
-    .into()
-}
-
-/// A command button (Connect, Create wallet, Copy, …).
-fn action_button(label: &str) -> iced::widget::Button<'_, Message> {
-    button(text(label).size(14)).padding([7, 14])
-}
-
-/// One option of a segmented choice (tabs, modes, chains, accounts).
-fn segment_button<'a>(
-    label: impl text::IntoFragment<'a>,
-    message: Message,
-    selected: bool,
-) -> iced::widget::Button<'a, Message> {
-    button(text(label).size(13))
-        .style(if selected {
-            button::primary
-        } else {
-            button::secondary
-        })
-        .on_press(message)
-}
-
-fn tab_button(label: &str, tab: Tab, active: Tab) -> iced::widget::Button<'_, Message> {
-    segment_button(label, Message::TabSelected(tab), tab == active)
-}
-
-fn section_divider<'a>() -> Element<'a, Message> {
-    container(Space::new().height(1))
-        .height(1)
-        .width(Length::Fill)
-        .style(|_theme| container::Style {
-            background: Some(Background::Color(Color::from_rgb8(72, 78, 88))),
-            ..container::Style::default()
-        })
-        .into()
-}
-
-fn panel_style(_theme: &Theme) -> container::Style {
-    container::Style {
-        background: Some(Background::Color(Color::from_rgb8(45, 49, 56))),
-        text_color: Some(Color::from_rgb8(226, 230, 236)),
-        border: Border {
-            width: 1.0,
-            radius: 6.0.into(),
-            color: Color::from_rgb8(65, 72, 82),
-        },
-        ..container::Style::default()
-    }
-}
-
-/// A panel that needs attention now (running setup, incoming requests).
-fn highlight_style(theme: &Theme) -> container::Style {
-    container::Style {
-        border: Border {
-            width: 1.0,
-            radius: 6.0.into(),
-            color: accent(),
-        },
-        ..panel_style(theme)
-    }
-}
-
-fn short_addr(addr: &str) -> String {
-    if addr.len() > 20 {
-        format!("{}…{}", &addr[..10], &addr[addr.len() - 6..])
-    } else {
-        addr.to_string()
-    }
-}
-
-fn accent() -> Color {
-    Color::from_rgb(0.063, 0.725, 0.506) // #10B981
-}
-
-fn warning() -> Color {
-    Color::from_rgb8(236, 190, 104)
-}
-
-fn danger() -> Color {
-    Color::from_rgb8(248, 113, 113)
-}
-
-fn muted() -> Color {
-    Color::from_rgb(0.58, 0.64, 0.72) // #94A3B8
-}
-
-fn faint() -> Color {
-    Color::from_rgb(0.80, 0.84, 0.88) // #CBD5E1
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1797,17 +1248,21 @@ mod tests {
         state.connected_url = Some(state.signal_url());
     }
 
-    /// A 2-of-3 wallet whose group key is the secp256k1 generator — any valid
-    /// point works for address derivation.
+    /// The secp256k1 generator G — any valid point works for address
+    /// derivation; its Ethereum address is the well-known privkey-1 one.
+    const G: &str = "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798";
+
+    /// A 2-of-3 secp256k1 wallet as the engine stores it: an ECDSA key
+    /// (Ethereum) and a FROST Taproot key (Bitcoin), both = G here.
     fn with_wallet(state: &mut State) {
         state.wallets = vec![WalletView {
             id: "9c1f4e2ab37d".to_string(),
             name: "Treasury".to_string(),
             threshold: "2/3".to_string(),
-            keys: vec![(
-                "secp256k1".to_string(),
-                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798".to_string(),
-            )],
+            keys: vec![
+                ("secp256k1-ecdsa".to_string(), G.to_string()),
+                ("secp256k1".to_string(), G.to_string()),
+            ],
         }];
     }
 
@@ -1818,9 +1273,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn failed_connection_shows_error_and_allows_retry_without_editing_url() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Connection;
+        state.connected_url = Some(state.signal_url());
+        state.apply_ui_event(UiEvent::ConnectionFailed);
+        assert!(!state.connected);
+        assert!(state.status_is_error);
+        assert!(state.status.contains("Could not connect"));
+        assert!(state.network_changed());
+        assert!(matches!(
+            clicked(&state, "Connect").as_slice(),
+            [Message::Connect]
+        ));
+        assert!(simulator(state.view()).find("Offline").is_ok());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn connection_and_backup_controls_are_reachable_from_navigation() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        assert!(simulator(state.view()).find("Signal server").is_err());
+        assert!(simulator(state.view()).find("Key share password").is_err());
+        assert!(matches!(
+            clicked(&state, "Connection & devices").as_slice(),
+            [Message::TabSelected(Tab::Connection)]
+        ));
+        let _ = state.update(Message::TabSelected(Tab::Connection));
+        assert!(simulator(state.view()).find("Signal server").is_ok());
+        assert!(matches!(
+            clicked(&state, "Backup & restore").as_slice(),
+            [Message::TabSelected(Tab::Backup)]
+        ));
+        let _ = state.update(Message::TabSelected(Tab::Backup));
+        assert!(simulator(state.view()).find("Key share password").is_ok());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
     async fn network_has_a_single_new_room_action() {
         let _renderer = renderer_lock();
-        let (state, keystore) = test_state();
+        let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Connection;
         let mut ui = simulator(state.view());
         assert!(
             ui.find("New").is_err(),
@@ -1837,6 +1333,7 @@ mod tests {
     async fn new_room_while_connected_offers_reconnect() {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Connection;
         connected(&mut state);
         assert!(simulator(state.view()).find("Reconnect").is_err());
         let _ = state.update(Message::NewRoom);
@@ -1913,6 +1410,195 @@ mod tests {
         let _ = std::fs::remove_dir_all(keystore);
     }
 
+    /// `r ‖ s ‖ v` (v = 27/28) by the single key `[7; 32]` over the EIP-191
+    /// hash of `message`, plus that key's Ethereum address.
+    fn eth_sign(message: &[u8]) -> (String, String) {
+        let key = k256::ecdsa::SigningKey::from_slice(&[7u8; 32]).unwrap();
+        let prehash = starlab_client::utils::eth_helper::eip191_hash(message);
+        let (sig, recid) = key.sign_prehash_recoverable(&prehash);
+        let mut bytes = sig.to_bytes().to_vec();
+        bytes.push(27 + recid.to_byte());
+        let pubkey = key.verifying_key().to_sec1_point(true);
+        let address = starlab_core::accounts::address_for_chain(
+            "ethereum",
+            starlab_core::ecdsa::ECDSA_CURVE,
+            pubkey.as_bytes(),
+        )
+        .unwrap();
+        (format!("0x{}", hex::encode(bytes)), address)
+    }
+
+    #[test]
+    fn ethereum_signature_is_split_into_r_s_v_and_verified_by_ecrecover() {
+        let (sig, address) = eth_sign(b"Hello");
+        let signed = SignedFor {
+            chain: "ethereum",
+            message_hex: "48656c6c6f".to_string(),
+            prehashed: false,
+            address: address.clone(),
+            cosigned: false,
+        };
+        let summary = signature_summary(Some(&signed), &sig);
+        assert!(
+            summary.label.contains("ecrecover-compatible"),
+            "{summary:?}"
+        );
+        assert_eq!(summary.parts.len(), 3);
+        assert!(summary.parts[0].starts_with("r = 0x"));
+        assert!(summary.parts[2] == "v = 27" || summary.parts[2] == "v = 28");
+        assert!(summary.verified, "{summary:?}");
+        assert!(summary.verification.contains(&address), "{summary:?}");
+    }
+
+    #[test]
+    fn ethereum_signature_for_another_message_is_not_verified() {
+        let (sig, address) = eth_sign(b"Hello");
+        let signed = SignedFor {
+            chain: "ethereum",
+            message_hex: "00".to_string(),
+            prehashed: false,
+            address,
+            cosigned: false,
+        };
+        let summary = signature_summary(Some(&signed), &sig);
+        assert!(!summary.verified);
+        assert!(
+            summary.verification.starts_with("NOT verified"),
+            "{summary:?}"
+        );
+    }
+
+    /// A co-signer only has the request's EIP-191 digest; it verifies the
+    /// signature against that digest and the request's account address.
+    #[tokio::test]
+    async fn cosigned_ethereum_signature_is_verified_against_the_request_digest() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        with_wallet(&mut state);
+        let request = peer_request("9c1f4e2ab37d-ethereum-0", "00");
+        let target = state.cosign_target(&request).expect("our wallet's account");
+        assert!(target.cosigned && target.prehashed);
+        assert_eq!(
+            Some(target.address.clone()),
+            state.signing_address().map(|(a, _)| a),
+            "Ethereum account 0 of the ECDSA key"
+        );
+        // A signature over a digest by a known key, checked as prehashed.
+        let (sig, address) = eth_sign(b"Hello");
+        let digest = starlab_client::utils::eth_helper::eip191_hash(b"Hello");
+        let signed = SignedFor {
+            message_hex: hex::encode(digest),
+            address,
+            ..target
+        };
+        assert!(signature_summary(Some(&signed), &sig).verified);
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[test]
+    fn ethereum_comes_from_the_ecdsa_key_bitcoin_from_taproot() {
+        let wallet = WalletView {
+            id: "w".to_string(),
+            name: "w".to_string(),
+            threshold: "2/3".to_string(),
+            keys: vec![("secp256k1".to_string(), G.to_string())],
+        };
+        assert!(
+            !wallet_has_chain(&wallet, "ethereum"),
+            "no ECDSA key, no Ethereum"
+        );
+        assert!(wallet_has_chain(&wallet, "bitcoin"));
+        let (address, path) = account_address(&wallet, "bitcoin", 0).unwrap();
+        assert!(address.starts_with("bc1p"), "{address}");
+        assert_eq!(path, "m/86'/0'/0'/0/0");
+        assert_eq!(
+            device_chains("secp256k1"),
+            vec![("ethereum", "Ethereum"), ("bitcoin", "Bitcoin")]
+        );
+    }
+
+    #[tokio::test]
+    async fn non_hex_message_is_blocked_before_signing() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        connected(&mut state);
+        with_wallet(&mut state);
+        state.passwords.unlock = "pw".to_string();
+        state.sign_hex = "hello".to_string();
+        assert_eq!(state.sign_blocker(), Some("The message must be hex bytes."));
+        state.sign_hex = "0x48656c6c6f".to_string();
+        assert_eq!(state.sign_blocker(), None);
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn sign_tab_offers_ethereum_via_ecdsa_and_bitcoin() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        connected(&mut state);
+        with_wallet(&mut state);
+        state.active_tab = Tab::Sign;
+        assert_eq!(
+            state.sign_chain, "ethereum",
+            "Ethereum is the default chain"
+        );
+        let mut ui = simulator(state.view());
+        assert!(ui.find("Bitcoin").is_ok());
+        assert!(
+            ui.find("m/44'/60'/0'/0/0").is_err(),
+            "path stays behind signing details"
+        );
+        drop(ui);
+        state.show_signing_details = true;
+        assert!(simulator(state.view()).find("m/44'/60'/0'/0/0").is_ok());
+        assert_eq!(
+            state.signing_wallet_id().as_deref(),
+            Some("9c1f4e2ab37d-ethereum-0")
+        );
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
+    async fn ecdsa_setup_status_is_shown_and_a_waiting_setup_says_so() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        state.ecdsa_setup = EcdsaSetup::Preparing { elapsed_secs: 72 };
+        state.active_tab = Tab::Connection;
+        assert!(
+            simulator(state.view())
+                .find("Secure setup: preparing (1m 12s so far, usually 1-5 min)")
+                .is_ok()
+        );
+        // FROST done, Ethereum key waiting for this device's primes.
+        state.ceremony_open = true;
+        state.ecdsa_keygen = true;
+        state.ecdsa_phase = Some(DkgPhase::WaitingForPrimes);
+        let mut ui = simulator(state.view());
+        assert!(ui.find("Creating Ethereum wallet").is_ok());
+        assert!(
+            ui.find(
+                "Preparing secure wallet setup (1m 12s so far, usually 1-5 min). Keep \
+                 every device online."
+            )
+            .is_ok()
+        );
+        drop(ui);
+        state.ecdsa_setup = EcdsaSetup::Ready;
+        assert!(simulator(state.view()).find("Secure setup: ready").is_ok());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[test]
+    fn running_ecdsa_ceremony_does_not_wait_for_next_wallet_primes() {
+        let next_wallet = EcdsaSetup::Preparing { elapsed_secs: 72 };
+        for phase in [DkgPhase::AuxInfo, DkgPhase::Keygen] {
+            let detail = ecdsa_keygen_detail(Some(phase), next_wallet);
+            assert!(detail.starts_with("Creating your shared Ethereum key"));
+        }
+        let detail = ecdsa_keygen_detail(Some(DkgPhase::WaitingForPrimes), next_wallet);
+        assert!(detail.starts_with("Preparing secure wallet setup"));
+    }
+
     #[tokio::test]
     async fn setup_has_one_action_per_section() {
         let _renderer = renderer_lock();
@@ -1933,9 +1619,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn active_setup_focuses_devices_and_keeps_cancel_reachable() {
+        let _renderer = renderer_lock();
+        let (mut state, keystore) = test_state();
+        state.ceremony_open = true;
+        state.active_session = Some(invite("active", "me", &["me", "laptop"]));
+        let mut ui = simulator(state.view());
+        assert!(ui.find("Current wallet setup").is_ok());
+        assert!(ui.find("Create a new wallet").is_err());
+        assert!(ui.find("Join a wallet").is_err());
+        drop(ui);
+        assert!(matches!(
+            clicked(&state, "Cancel").as_slice(),
+            [Message::CancelSetup]
+        ));
+        state.ceremony_open = false;
+        assert!(simulator(state.view()).find("Create a new wallet").is_ok());
+        let _ = std::fs::remove_dir_all(keystore);
+    }
+
+    #[tokio::test]
     async fn export_needs_a_wallet_and_an_8_character_password() {
         let _renderer = renderer_lock();
         let (mut state, keystore) = test_state();
+        state.active_tab = Tab::Backup;
         state.passwords.backup = "password1".to_string();
         assert!(clicked(&state, "Export key share…").is_empty());
         with_wallet(&mut state);
@@ -1946,9 +1653,14 @@ mod tests {
             clicked(&state, "Export key share…").as_slice(),
             [Message::ExportShare]
         ));
+        // Every key of the wallet is exported — the ECDSA file is the
+        // Ethereum account.
         assert_eq!(
             state.export_target(),
-            Some(("9c1f4e2ab37d".to_string(), "secp256k1".to_string()))
+            Some((
+                "9c1f4e2ab37d".to_string(),
+                vec!["secp256k1-ecdsa".to_string(), "secp256k1".to_string()]
+            ))
         );
         let _ = std::fs::remove_dir_all(keystore);
     }
@@ -2045,18 +1757,21 @@ mod tests {
         let Ok(dir) = std::env::var("SNAPSHOT_DIR") else {
             return;
         };
+        let manifest = std::cell::RefCell::new(Vec::new());
         let shot = |state: &State, name: &str| {
-            let mut ui = iced_test::Simulator::with_size(
-                iced::Settings::default(),
-                (1440.0, 900.0),
-                state.view(),
-            );
-            let snapshot = ui.snapshot(&Theme::Dark).expect("snapshot");
-            let path = std::path::Path::new(&dir).join(name);
-            assert!(
-                snapshot.matches_image(&path).expect("png"),
-                "{name} changed"
-            );
+            for (viewport, size) in [("normal", (1440.0, 900.0)), ("narrow", (1024.0, 768.0))] {
+                let folder = std::path::Path::new(&dir).join(viewport);
+                std::fs::create_dir_all(&folder).expect("snapshot folder");
+                let mut ui =
+                    iced_test::Simulator::with_size(iced::Settings::default(), size, state.view());
+                let snapshot = ui.snapshot(&state.theme()).expect("snapshot");
+                let path = folder.join(name);
+                assert!(
+                    snapshot.matches_image(&path).expect("png"),
+                    "{viewport}/{name} changed"
+                );
+                manifest.borrow_mut().push(serde_json::json!({"state":name,"viewport":viewport,"width":size.0,"height":size.1,"provenance":"public fixture data; no private shares","file":format!("{viewport}/{name}-tiny-skia.png")}));
+            }
         };
 
         let (mut state, keystore) = test_state();
@@ -2109,6 +1824,127 @@ mod tests {
         ));
         state.last_signature = "a3f1c9e2".repeat(16);
         shot(&state, "5-sign");
+        state.signing_request = None;
+        state.last_signature.clear();
+        shot(&state, "06-wallet-sign");
+        state.active_tab = Tab::Connection;
+        shot(&state, "07-connection");
+        state.server_url = "invalid server".to_string();
+        shot(&state, "08-connection-invalid");
+        state.server_url = "ws://127.0.0.1:9".to_string();
+        state.active_tab = Tab::Backup;
+        shot(&state, "09-backup-locked");
+        state.passwords.backup = "fixture-password".to_string();
+        shot(&state, "10-backup-ready");
+        state.status = "Backup password is incorrect. Try again.".to_string();
+        state.status_is_error = true;
+        shot(&state, "11-backup-error");
+        state.status = "Encrypted device backup saved.".to_string();
+        state.status_is_error = false;
+        shot(&state, "12-backup-success");
+        state.active_tab = Tab::Setup;
+        state.ceremony_open = true;
+        state.ecdsa_keygen = true;
+        state.ecdsa_setup = EcdsaSetup::Preparing { elapsed_secs: 72 };
+        state.active_session = Some(invite(
+            "fixture-active-setup",
+            "me",
+            &["me", "laptop", "phone"],
+        ));
+        for (name, phase) in [
+            ("13-setup-primes", DkgPhase::WaitingForPrimes),
+            ("14-setup-aux", DkgPhase::AuxInfo),
+            ("15-setup-keygen", DkgPhase::Keygen),
+        ] {
+            state.ecdsa_phase = Some(phase);
+            shot(&state, name);
+        }
+        state.ceremony_open = false;
+        state.ecdsa_keygen = false;
+        state.ecdsa_phase = None;
+        state.active_session = None;
+        let previous_status = state.status.clone();
+        let previous_status_is_error = state.status_is_error;
+        state.status =
+            "Wallet setup failed: a device disconnected. Reconnect the devices and try again."
+                .to_string();
+        state.status_is_error = true;
+        shot(&state, "15b-setup-failed");
+        state.status = previous_status;
+        state.status_is_error = previous_status_is_error;
+        state.active_tab = Tab::Sign;
+        state.selected_account = 1;
+        let mut second_wallet = state.wallets[0].clone();
+        second_wallet.name = "Operations".to_string();
+        second_wallet.id = "fixture-operations".to_string();
+        state.wallets.push(second_wallet);
+        shot(&state, "16-wallets-accounts");
+        state.sign_hex = "invalid hex".to_string();
+        shot(&state, "17-sign-invalid");
+        state.sign_hex = "48656c6c6f".to_string();
+        state.signing_request = Some(peer_request(
+            "9c1f4e2ab37d-ethereum-0",
+            "fa4de0de7cb829ad54bf4982c3603afe1596fd39a76004184fa2844fda56ac6c",
+        ));
+        state.passwords.unlock.clear();
+        shot(&state, "18-approval-password");
+        state.passwords.unlock = "fixture-password".to_string();
+        state.pending_action = Some(PendingAction::CoSign);
+        state.signing_state = SigningState::Aggregating;
+        shot(&state, "19-approval-working");
+        state.pending_action = None;
+        state.signing_state =
+            SigningState::Failed("The other device declined this request.".to_string());
+        shot(&state, "20-approval-declined");
+        state.signing_state =
+            SigningState::Failed("Wallet password is incorrect. Try again.".to_string());
+        shot(&state, "20b-approval-password-error");
+        state.signing_request = None;
+        state.signing_state = SigningState::Complete;
+        state.selected_account = 0;
+        state.wallets[0].keys[0].1 =
+            "032affa8a1c464656c918705206638118d36adc42fb4310f9b12f6b027a0a53b8b".to_string();
+        state.last_signature = "7937057016c1e21b9ff07affded820bf5aa5bf483d9610a27584716007925fd90b4fe3b114f15ca8dc3332f44250e5904611bd4cab4a53334aa17bbd9cd0a8cc1c".to_string();
+        state.last_signed = Some(SignedFor {
+            chain: "ethereum",
+            message_hex: "fa4de0de7cb829ad54bf4982c3603afe1596fd39a76004184fa2844fda56ac6c"
+                .to_string(),
+            prehashed: true,
+            address: "0x2fb6ae33558e46ec6baa39c9c98cd00f4b0f7548".to_string(),
+            cosigned: true,
+        });
+        shot(&state, "21-signature-verified");
+        state.sign_chain = "bitcoin";
+        state.last_signature.clear();
+        shot(&state, "21b-bitcoin-sign");
+        state.active_tab = Tab::Activity;
+        shot(&state, "22-activity-empty");
+        state.log_messages = vec![
+            "14:50:00 [INFO] Wallet setup started with 3 devices.".to_string(),
+            "14:52:00 [INFO] Ethereum wallet is ready.".to_string(),
+            "14:53:00 [ERROR] Another device declined the signature request.".to_string(),
+            "14:55:00 [INFO] Signature verified for Treasury, account 0.".to_string(),
+        ];
+        shot(&state, "23-activity-events");
+        state.show_activity_details = true;
+        shot(&state, "24-activity-details");
+        state.active_tab = Tab::Sign;
+        state.signing_curve = "ed25519";
+        state.wallets.truncate(1);
+        state.wallets[0].keys = vec![(
+            "ed25519".to_string(),
+            "5866666666666666666666666666666666666666666666666666666666666666".to_string(),
+        )];
+        state.ecdsa_setup = EcdsaSetup::NotNeeded;
+        state.sign_chain = "solana";
+        shot(&state, "25-solana-sign");
+        state.sign_chain = "sui";
+        shot(&state, "26-sui-sign");
+        std::fs::write(
+            std::path::Path::new(&dir).join("manifest.json"),
+            serde_json::to_string_pretty(&manifest.into_inner()).unwrap(),
+        )
+        .expect("snapshot manifest");
 
         let _ = std::fs::remove_dir_all(keystore);
     }

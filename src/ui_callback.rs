@@ -17,21 +17,61 @@ use starlab_client::core::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-/// A wallet grouped across curves for display: one entry per `wallet_id`, with
-/// the group key of every curve it holds (secp256k1 → Ethereum + Bitcoin;
-/// ed25519 → Solana + Sui; a unified wallet has both curves). Addresses are
+/// A wallet grouped across its keys for display: one entry per `wallet_id`,
+/// with the group key of every key file it holds (secp256k1-ecdsa → Ethereum;
+/// secp256k1 → Bitcoin; ed25519 → Solana + Sui). Addresses are
 /// NOT carried here — the view derives them per BIP-44 account from the group
 /// key via `starlab_core::accounts` (public-only, cheap), so switching
 /// accounts is a pure `State` change with no async round-trip. The root
 /// group-key address is never shown: account 0 is the default identity.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct WalletView {
     pub id: String,
     pub name: String,
     pub threshold: String,
-    /// (curve_type, group_public_key_hex) — one entry per curve this wallet
-    /// holds ("secp256k1" / "ed25519"; a unified wallet has both).
+    /// (curve_type, group_public_key_hex) — one entry per key this wallet
+    /// holds: "secp256k1-ecdsa" (Ethereum, threshold ECDSA), "secp256k1"
+    /// (Bitcoin, FROST Taproot), "ed25519" (Solana + Sui).
     pub keys: Vec<(String, String)>,
+}
+
+/// The "ECDSA setup" of this device: the Paillier safe primes the next
+/// wallet's Ethereum (threshold-ECDSA) key needs. They are generated in the
+/// background from startup (minutes of CPU); a wallet setup started before
+/// they are ready waits for them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EcdsaSetup {
+    /// An ed25519 device: no Ethereum key, nothing to prepare.
+    NotNeeded,
+    /// Generating, for `elapsed_secs` so far.
+    Preparing {
+        elapsed_secs: u64,
+    },
+    Ready,
+}
+
+impl EcdsaSetup {
+    /// One status line, e.g. "Secure setup: preparing (1m 12s so
+    /// far, usually 1-5 min)"; `None` when there's nothing to show.
+    pub fn describe(&self) -> Option<String> {
+        match self {
+            Self::NotNeeded => None,
+            Self::Preparing { elapsed_secs } => Some(format!(
+                "Secure setup: preparing ({} so far, usually 1-5 min)",
+                format_elapsed(*elapsed_secs)
+            )),
+            Self::Ready => Some("Secure setup: ready".to_string()),
+        }
+    }
+}
+
+/// "42s" / "1m 12s".
+pub fn format_elapsed(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {:02}s", secs / 60, secs % 60)
+    }
 }
 
 /// A new-wallet (DKG) session announced in the room. Peers' signing
@@ -51,6 +91,7 @@ pub struct Invite {
 #[derive(Debug, Clone)]
 pub enum UiEvent {
     Connected(bool),
+    ConnectionFailed,
     /// Peers with an open WebRTC data channel to this device.
     Peers(usize),
     Wallets(Vec<WalletView>),
@@ -64,6 +105,14 @@ pub enum UiEvent {
     /// The runner has a wallet ceremony open — as creator (invite announced)
     /// or joiner (joined, waiting for DKG). Cleared on finalize/cancel.
     CeremonyOpen(bool),
+    /// The FROST keys of the running wallet setup are done and its Ethereum
+    /// key (threshold ECDSA: safe primes → aux info → keygen) is being made.
+    EcdsaKeygen {
+        running: bool,
+        phase: Option<starlab_client::protocal::ecdsa::DkgPhase>,
+    },
+    /// This device's safe-prime generator, polled once a second.
+    EcdsaSetup(EcdsaSetup),
     /// The signing manager's current request: ours while we sign, or a
     /// peer's (`session_id` set) waiting for this device to approve.
     SigningRequest(Option<SigningRequest>),

@@ -10,7 +10,7 @@ publish = false
 # Iced UI (Elm architecture, MIT-licensed). The default backend (wgpu) +
 # tiny-skia fallback covers X11, Wayland, macOS and Windows. `tokio` feature
 # wires Iced's executor to the same Tokio runtime the core managers run on.
-iced = { version = "0.14", features = ["tokio"] }
+iced = { version = "0.14", features = ["tokio", "svg", "image-without-codecs"] }
 
 # Business-logic backend: the FROST engine + core managers
 # (WalletManager, SessionManager, DkgManager, OfflineManager,
@@ -22,6 +22,9 @@ starlab-client = { git = "https://github.com/stars-labs/starlab-mpc", branch = "
 # derivation) — single source of truth shared by every client. Used directly
 # by the view layer so switching accounts is a pure local re-derivation.
 starlab-core = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }
+
+# Decode the packaged Sui PNG only; avoid unrelated image codec dependencies.
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 hex = "0.4.3"
 uuid = { version = "1.26.1", features = ["v4"] }
@@ -60,5 +63,32 @@ path = "src/main.rs"
 # Headless UI tests: simulate clicks and render snapshots without a window.
 iced_test = "0.14"
 serde_json = "1.0.151"
+# Sign test messages with a known key to check the ecrecover verification.
+k256 = { version = "0.14.0", features = ["ecdsa"] }
 # In-process signal server for the end-to-end create → sign test.
 starlab-signal-server = { git = "https://github.com/stars-labs/starlab-mpc", branch = "main" }
+
+# The engine's threshold ECDSA (cggmp24) is big-integer heavy (Paillier + ZK
+# proofs): unoptimized, a debug build's wallet setup and the e2e test take
+# 10-50x longer. Optimize just that arithmetic stack in dev/test builds (same
+# list as the engine's workspace).
+[profile.dev.package.num-bigint]
+opt-level = 3
+[profile.dev.package.num-integer]
+opt-level = 3
+[profile.dev.package.fast-paillier]
+opt-level = 3
+[profile.dev.package.paillier-zk]
+opt-level = 3
+[profile.dev.package.cggmp24]
+opt-level = 3
+[profile.dev.package.cggmp24-keygen]
+opt-level = 3
+[profile.dev.package.generic-ec]
+opt-level = 3
+[profile.dev.package.generic-ec-curves]
+opt-level = 3
+[profile.dev.package.k256]
+opt-level = 3
+[profile.dev.package.crypto-bigint]
+opt-level = 3
