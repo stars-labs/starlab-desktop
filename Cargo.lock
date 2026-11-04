@@ -8013,7 +8013,7 @@ dependencies = [
 [[package]]
 name = "starlab-client"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#63336972abc60b5cedc2026c039efcdf8e4f2dd8"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#712f0364c6800e038fb4878b9768de01aacb62c4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -8059,7 +8059,7 @@ dependencies = [
 [[package]]
 name = "starlab-core"
 version = "0.1.0"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#63336972abc60b5cedc2026c039efcdf8e4f2dd8"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#712f0364c6800e038fb4878b9768de01aacb62c4"
 dependencies = [
  "aes-gcm",
  "argon2",
@@ -8117,7 +8117,7 @@ dependencies = [
 [[package]]
 name = "starlab-signal-server"
 version = "0.1.1"
-source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#63336972abc60b5cedc2026c039efcdf8e4f2dd8"
+source = "git+https://github.com/stars-labs/starlab-mpc?branch=main#712f0364c6800e038fb4878b9768de01aacb62c4"
 dependencies = [
  "futures-util",
  "serde",
