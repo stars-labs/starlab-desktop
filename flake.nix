@@ -36,10 +36,10 @@
             libGL
             vulkan-loader
             mesa
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXrandr
-            xorg.libXi
+            libx11
+            libxcursor
+            libxrandr
+            libxi
           ];
 
           darwinBuildInputs = with pkgs; [ libiconv ];
@@ -49,26 +49,26 @@
             libxkbcommon
             vulkan-loader
             libGL
-            xorg.libX11
-            xorg.libXcursor
-            xorg.libXrandr
-            xorg.libXi
+            libx11
+            libxcursor
+            libxrandr
+            libxi
             fontconfig
             freetype
           ]);
 
           platformBuildInputs =
-            if pkgs.stdenv.isLinux then linuxBuildInputs
-            else if pkgs.stdenv.isDarwin then darwinBuildInputs
+            if pkgs.stdenv.hostPlatform.isLinux then linuxBuildInputs
+            else if pkgs.stdenv.hostPlatform.isDarwin then darwinBuildInputs
             else [ ];
         in
         {
           devShells.default = pkgs.mkShell {
             RUST_SRC_PATH = "${pkgs.rust.packages.stable.rustPlatform.rustLibSrc}";
             RUST_BACKTRACE = 1;
-            LD_LIBRARY_PATH = if pkgs.stdenv.isLinux then linuxLibraryPath else "";
+            LD_LIBRARY_PATH = if pkgs.stdenv.hostPlatform.isLinux then linuxLibraryPath else "";
             DYLD_FALLBACK_LIBRARY_PATH =
-              if pkgs.stdenv.isDarwin then "${pkgs.libiconv}/lib" else "";
+              if pkgs.stdenv.hostPlatform.isDarwin then "${pkgs.libiconv}/lib" else "";
             nativeBuildInputs = commonBuildInputs ++ platformBuildInputs;
             shellHook = ''
               echo "🖥️  Starlab Desktop dev shell (Iced + starlab-mpc engine)"
