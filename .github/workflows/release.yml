@@ -187,7 +187,7 @@ jobs:
 
             > **macOS note**: Unsigned open-source build — if Gatekeeper warns on first open, right-click `Starlab Desktop.app` → **Open** (or run `xattr -cr "/Applications/Starlab Desktop.app"`).
 
-            - **Full Visual Guide**: https://starslab-app.freeman-xiong.workers.dev/wallet
+            - **Full Visual Guide**: https://wallet.starslab.qzz.io
             - **Browser Extension**: https://github.com/stars-labs/starlab-wallet/releases
             - **TUI / CLI Engine**: https://github.com/stars-labs/starlab-mpc/releases
           files: release-assets/*
