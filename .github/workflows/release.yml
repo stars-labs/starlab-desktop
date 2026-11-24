@@ -1,0 +1,193 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (defaults to current ref name)'
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            asset: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            asset: linux-aarch64
+          - os: macos-14
+            target: aarch64-apple-darwin
+            asset: macos-arm64
+          - os: macos-14
+            target: x86_64-apple-darwin
+            asset: macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            asset: windows-x86_64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine release tag
+        id: meta
+        shell: bash
+        run: |
+          TAG="${{ inputs.tag || github.ref_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: desktop-release-${{ matrix.target }}
+
+      - name: Install Linux GUI & graphics dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libx11-dev \
+            libxcursor-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libwayland-dev \
+            libxkbcommon-dev \
+            libvulkan-dev \
+            libgtk-3-dev \
+            libfontconfig1-dev \
+            libfreetype-dev
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }} --bin starlab-desktop
+
+      - name: Package Linux archive
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          STAGE="starlab-desktop-${TAG}-${{ matrix.asset }}"
+          mkdir -p "dist/${STAGE}"
+          cp "target/${{ matrix.target }}/release/starlab-desktop" "dist/${STAGE}/"
+          chmod +x "dist/${STAGE}/starlab-desktop"
+          [ -f README.md ] && cp README.md "dist/${STAGE}/"
+          [ -f LICENSE ] && cp LICENSE "dist/${STAGE}/"
+          tar -C dist -czf "dist/${STAGE}.tar.gz" "${STAGE}"
+          rm -rf "dist/${STAGE}"
+
+      - name: Package macOS .app & .dmg
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          VER="${{ steps.meta.outputs.version }}"
+          APP="dist/Starlab Desktop.app"
+          mkdir -p "${APP}/Contents/MacOS" "${APP}/Contents/Resources"
+          cp "target/${{ matrix.target }}/release/starlab-desktop" "${APP}/Contents/MacOS/starlab-desktop"
+          chmod +x "${APP}/Contents/MacOS/starlab-desktop"
+          cat > "${APP}/Contents/Info.plist" <<EOF
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>Starlab Desktop</string>
+            <key>CFBundleDisplayName</key><string>Starlab Desktop</string>
+            <key>CFBundleIdentifier</key><string>dev.starslab.desktop</string>
+            <key>CFBundleVersion</key><string>${VER}</string>
+            <key>CFBundleShortVersionString</key><string>${VER}</string>
+            <key>CFBundleExecutable</key><string>starlab-desktop</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          EOF
+          # Tarball for CLI/power users
+          tar -C dist -czf "dist/starlab-desktop-${TAG}-${{ matrix.asset }}.tar.gz" "Starlab Desktop.app"
+          # Drag-to-Applications DMG
+          mkdir -p dmg-stage
+          cp -R "${APP}" dmg-stage/
+          ln -s /Applications dmg-stage/Applications
+          hdiutil create -volname "Starlab Desktop" -srcfolder dmg-stage -ov -format UDZO \
+            "dist/starlab-desktop-${TAG}-${{ matrix.asset }}.dmg"
+          rm -rf "${APP}" dmg-stage
+
+      - name: Package Windows archive
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $stage = "starlab-desktop-$tag-${{ matrix.asset }}"
+          New-Item -ItemType Directory -Force -Path "dist/$stage" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/starlab-desktop.exe" "dist/$stage/"
+          if (Test-Path README.md) { Copy-Item README.md "dist/$stage/" }
+          if (Test-Path LICENSE) { Copy-Item LICENSE "dist/$stage/" }
+          Compress-Archive -Path "dist/$stage/*" -DestinationPath "dist/$stage.zip" -Force
+          Remove-Item -Recurse -Force "dist/$stage"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: starlab-desktop-${{ matrix.asset }}
+          path: dist/starlab-desktop-*
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    if: always() && (needs.build.result == 'success' || needs.build.result == 'failure')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd release-assets
+          ls -lh
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          name: Starlab Desktop ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ## Starlab Desktop — Native Multi-Chain MPC Wallet (${{ inputs.tag || github.ref_name }})
+
+            Zero-seed-phrase threshold custody across **100+ EVM chains (CGGMP24 ECDSA), Bitcoin Taproot (BIP-340), Solana, and Sui (Ed25519 FROST)**.
+
+            ### Downloads
+            - **macOS (Apple Silicon M1–M5)**: `starlab-desktop-${{ inputs.tag || github.ref_name }}-macos-arm64.dmg`
+            - **macOS (Intel)**: `starlab-desktop-${{ inputs.tag || github.ref_name }}-macos-x86_64.dmg`
+            - **Windows (x64)**: `starlab-desktop-${{ inputs.tag || github.ref_name }}-windows-x86_64.zip`
+            - **Linux (x86_64 / ARM64)**: `starlab-desktop-${{ inputs.tag || github.ref_name }}-linux-*.tar.gz`
+
+            > **macOS note**: Unsigned open-source build — if Gatekeeper warns on first open, right-click `Starlab Desktop.app` → **Open** (or run `xattr -cr "/Applications/Starlab Desktop.app"`).
+
+            - **Full Visual Guide**: https://starslab-app.freeman-xiong.workers.dev/wallet
+            - **Browser Extension**: https://github.com/stars-labs/starlab-wallet/releases
+            - **TUI / CLI Engine**: https://github.com/stars-labs/starlab-mpc/releases
+          files: release-assets/*
